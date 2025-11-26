@@ -43,14 +43,35 @@ pip install requests pyyaml
 mini_gfs/
   mini_gfs/
     master/          # Código del Master
+      master.py      # Lógica principal del Master
+      metadata.py    # Gestión de metadatos
+      api.py         # API HTTP del Master
     chunkserver/     # Código del ChunkServer
+      chunkserver.py # Lógica principal del ChunkServer
+      storage.py     # Almacenamiento local de chunks
+      api.py         # API HTTP del ChunkServer
     client/          # Código del Cliente CLI
+      cli.py         # Interfaz de línea de comandos
+      client_api.py  # API para comunicarse con Master/ChunkServers
     common/          # Tipos y utilidades compartidas
+      types.py       # Dataclasses y tipos compartidos
+      config.py      # Carga de configuración YAML
   configs/           # Archivos de configuración YAML
+    master.yaml      # Configuración del Master
+    chunkserver.yaml # Configuración base de ChunkServers
   data/              # Datos persistentes
     master/          # Snapshots de metadatos del Master
     chunks/          # Chunks almacenados por ChunkServer
   scripts/           # Scripts de ejecución
+    run_master.sh
+    run_chunkserver*.sh
+    run_client.sh
+  tests/             # Tests unitarios
+    test_metadata.py # Tests de metadatos
+  run_master.py      # Script principal para ejecutar Master
+  run_chunkserver.py # Script principal para ejecutar ChunkServer
+  run_client.py      # Script principal para ejecutar Cliente
+  The Google File System.pdf  # Paper completo de GFS (SOSP 2003)
 ```
 
 ## Uso
@@ -214,14 +235,19 @@ Los archivos de configuración están en `configs/`:
 - Coordina operaciones de archivos
 - Gestiona réplicas y leases
 - Detecta fallos y coordina re-replicación
+- **Servidor HTTP con threading**: Maneja peticiones concurrentes usando `ThreadingTCPServer`
+- **Background worker**: Thread separado para tareas periódicas (detección de fallos, re-replicación, snapshots)
+- **Sincronización**: Usa `RLock` (reentrant lock) para permitir llamadas anidadas seguras
 
 ### ChunkServer
 
-- Almacena chunks en disco local
+- Almacena chunks en disco local (un archivo por chunk: `<chunk_handle>.chunk`)
 - Se registra con el Master al iniciar
-- Envía heartbeats periódicos al Master
+- Envía heartbeats periódicos al Master (cada 10 segundos por defecto)
 - Responde a peticiones de lectura/escritura
 - Puede clonar chunks desde otros ChunkServers para re-replicación
+- **Servidor HTTP con threading**: Maneja múltiples peticiones concurrentes
+- **Thread de heartbeat**: Envía heartbeats periódicos sin bloquear el servidor principal
 
 ### Cliente
 
@@ -229,6 +255,7 @@ Los archivos de configuración están en `configs/`:
 - Se comunica con ChunkServers para datos
 - Coordina operaciones de escritura (data push a todas las réplicas)
 - Lee de cualquier réplica disponible
+- **Asignación automática de chunks**: Si un archivo no tiene chunks, los asigna automáticamente al escribir
 
 ## API HTTP
 
@@ -248,6 +275,22 @@ Los archivos de configuración están en `configs/`:
 - `POST /append_record`: Añadir record al final
 - `POST /clone_chunk`: Clonar chunk desde otro ChunkServer
 
+## Testing
+
+El proyecto incluye tests unitarios básicos para verificar la funcionalidad del sistema:
+
+```bash
+# Ejecutar tests
+python3 -m pytest tests/
+# o
+python3 -m unittest discover tests
+```
+
+Los tests actuales cubren:
+- Creación de archivos
+- Asignación de chunks
+- Persistencia y carga de snapshots de metadatos
+
 ## Limitaciones y Simplificaciones
 
 Este es un proyecto educativo, no un sistema de producción. Las siguientes simplificaciones se aplican:
@@ -260,10 +303,51 @@ Este es un proyecto educativo, no un sistema de producción. Las siguientes simp
 - No hay garbage collection distribuido
 - La persistencia de metadatos es un simple JSON (no logs de operaciones)
 - La re-replicación es síncrona y simplificada
+- El tamaño de chunk es fijo (1 MB por defecto, no 64 MB como en GFS real)
+- No hay optimizaciones de red (data pipeline simplificado)
+
+## Detalles de Implementación
+
+### Concurrencia y Threading
+
+- **Master y ChunkServers**: Usan `socketserver.ThreadingTCPServer` para manejar múltiples peticiones HTTP concurrentes
+- **Locks**: El Master usa `threading.RLock` (reentrant lock) para sincronización segura de metadatos
+- **Background threads**: 
+  - Master tiene un thread de background para detección de fallos y re-replicación
+  - ChunkServers tienen threads de background para enviar heartbeats periódicos
+
+### Protocolo de Comunicación
+
+- Todas las comunicaciones usan HTTP con JSON
+- Los datos binarios se codifican en base64 para transmisión JSON
+- Timeouts configurables para evitar bloqueos indefinidos
+
+### Persistencia
+
+- El Master guarda snapshots periódicos de metadatos en `data/master/metadata_snapshot.json`
+- Los chunks se almacenan como archivos individuales en disco
+- No hay logs de operaciones (WAL) - solo snapshots periódicos
 
 ## Referencias
 
-- Ghemawat, S., Gobioff, H., & Leung, S. T. (2003). The Google file system. ACM SIGOPS operating systems review, 37(5), 29-43.
+### Paper Original
+
+- **Ghemawat, S., Gobioff, H., & Leung, S. T. (2003).** The Google file system. ACM SIGOPS operating systems review, 37(5), 29-43.
+
+### Paper Completo
+
+El paper completo del Google File System está disponible en este repositorio:
+
+- **[The Google File System.pdf](The%20Google%20File%20System.pdf)** - Paper completo presentado en SOSP 2003
+
+Este documento describe en detalle:
+- La arquitectura y diseño de GFS
+- Las decisiones de diseño y sus justificaciones
+- El protocolo de replicación y consistencia
+- Los mecanismos de recuperación ante fallos
+- Evaluación de rendimiento y casos de uso en Google
+
+Se recomienda leer este paper para entender completamente los conceptos implementados en este mini-GFS educativo.
 
 ## Licencia
 
