@@ -1,0 +1,9 @@
+host: localhost
+port: 8000
+metadata_dir: data/master
+snapshot_file: metadata_snapshot.json
+chunk_size: 1048576  # 1 MB
+replication_factor: 3
+heartbeat_timeout: 30  # segundos
+lease_duration: 60  # segundos
+

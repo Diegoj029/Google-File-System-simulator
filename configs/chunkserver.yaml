@@ -1,0 +1,7 @@
+chunkserver_id: ""  # Se generará automáticamente si está vacío
+host: localhost
+port: 8001
+master_address: http://localhost:8000
+data_dir: data/chunks
+heartbeat_interval: 10  # segundos
+
