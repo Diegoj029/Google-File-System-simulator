@@ -7,7 +7,8 @@ Mantiene en memoria:
 - Información de ChunkServers
 - Leases activos
 
-También maneja la persistencia periódica a disco (JSON snapshot).
+También maneja la persistencia periódica a disco (JSON snapshot) y
+Write-Ahead Log (WAL) para recuperación ante fallos.
 """
 import json
 import uuid
@@ -21,6 +22,7 @@ from ..common.types import (
     LeaseInfo, ChunkServerInfo
 )
 from ..common.config import MasterConfig
+from .wal import WAL, OperationType
 
 
 class MasterMetadata:
@@ -53,6 +55,11 @@ class MasterMetadata:
         self.metadata_dir = Path(config.metadata_dir)
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.snapshot_path = self.metadata_dir / config.snapshot_file
+        
+        # Inicializar Write-Ahead Log (WAL)
+        wal_dir = config.wal_dir if hasattr(config, 'wal_dir') else str(self.metadata_dir)
+        wal_file = config.wal_file if hasattr(config, 'wal_file') else 'wal.log'
+        self.wal = WAL(wal_dir, wal_file)
     
     def create_file(self, path: str) -> bool:
         """
@@ -64,6 +71,10 @@ class MasterMetadata:
             return False
         
         self.files[path] = FileMetadata(path=path)
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.CREATE_FILE, {"path": path})
+        
         return True
     
     def get_file(self, path: str) -> Optional[FileMetadata]:
@@ -90,27 +101,48 @@ class MasterMetadata:
         # Generar nuevo chunk handle
         chunk_handle = str(uuid.uuid4())
         
-        # Seleccionar réplicas (hasta replication_factor)
+        # Seleccionar réplicas de racks diferentes (hasta replication_factor)
         num_replicas = min(self.config.replication_factor, len(available_chunkservers))
         if num_replicas == 0:
             return None
         
         replica_locations = []
-        for i in range(num_replicas):
-            cs_id = available_chunkservers[i % len(available_chunkservers)]
+        racks_used = set()
+        
+        # Primero intentar seleccionar de racks diferentes
+        for cs_id in available_chunkservers:
+            if len(replica_locations) >= num_replicas:
+                break
             cs_info = self.chunkservers.get(cs_id)
             if cs_info and cs_info.is_alive:
-                replica_locations.append(ChunkLocation(
-                    chunkserver_id=cs_id,
-                    address=cs_info.address
-                ))
+                # Si no hay muchos racks, permitir réplicas en el mismo rack
+                if cs_info.rack_id not in racks_used or len(racks_used) >= len(available_chunkservers):
+                    replica_locations.append(ChunkLocation(
+                        chunkserver_id=cs_id,
+                        address=cs_info.address
+                    ))
+                    racks_used.add(cs_info.rack_id)
+        
+        # Si no hay suficientes réplicas, completar sin restricción de racks
+        if len(replica_locations) < num_replicas:
+            for cs_id in available_chunkservers:
+                if len(replica_locations) >= num_replicas:
+                    break
+                cs_info = self.chunkservers.get(cs_id)
+                if cs_info and cs_info.is_alive:
+                    if not any(r.chunkserver_id == cs_id for r in replica_locations):
+                        replica_locations.append(ChunkLocation(
+                            chunkserver_id=cs_id,
+                            address=cs_info.address
+                        ))
         
         if not replica_locations:
             return None
         
-        # Crear metadatos del chunk
+        # Crear metadatos del chunk (versión inicial 0)
         chunk_meta = ChunkMetadata(
             handle=chunk_handle,
+            version=0,  # Versión inicial
             replicas=replica_locations,
             primary_id=replica_locations[0].chunkserver_id  # Primer replica como primary inicial
         )
@@ -125,6 +157,17 @@ class MasterMetadata:
         # Actualizar índice inverso
         for loc in replica_locations:
             self.chunkserver_chunks[loc.chunkserver_id].add(chunk_handle)
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.ALLOCATE_CHUNK, {
+            "path": path,
+            "chunk_index": chunk_index,
+            "chunk_handle": chunk_handle,
+            "replicas": [
+                {"chunkserver_id": r.chunkserver_id, "address": r.address}
+                for r in replica_locations
+            ]
+        })
         
         return chunk_handle
     
@@ -147,9 +190,12 @@ class MasterMetadata:
             cs_info.last_heartbeat = datetime.now()
             cs_info.is_alive = True
         else:
+            # Obtener rack_id del request si está disponible
+            rack_id = getattr(self, '_last_rack_id', "default")
             cs_info = ChunkServerInfo(
                 id=chunkserver_id,
                 address=address,
+                rack_id=rack_id,
                 chunks=chunks.copy()
             )
             self.chunkservers[chunkserver_id] = cs_info
@@ -187,6 +233,13 @@ class MasterMetadata:
         # Actualizar índice inverso
         self.chunkserver_chunks[chunkserver_id] = new_chunks
         cs_info.chunks = chunks.copy()
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.REGISTER_CHUNKSERVER, {
+            "chunkserver_id": chunkserver_id,
+            "address": address,
+            "chunks": chunks.copy()
+        })
         
         return True
     
@@ -244,6 +297,9 @@ class MasterMetadata:
         primary_id = live_replicas[0].chunkserver_id
         chunk_meta.primary_id = primary_id
         
+        # Incrementar versión del chunk al otorgar lease (para mutaciones)
+        chunk_meta.version += 1
+        
         # Crear nuevo lease
         lease = LeaseInfo(
             chunk_handle=chunk_handle,
@@ -251,6 +307,17 @@ class MasterMetadata:
             expiration=datetime.now() + timedelta(seconds=self.config.lease_duration)
         )
         self.leases[chunk_handle] = lease
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.INCREMENT_VERSION, {
+            "chunk_handle": chunk_handle,
+            "version": chunk_meta.version
+        })
+        self.wal.log_operation(OperationType.GRANT_LEASE, {
+            "chunk_handle": chunk_handle,
+            "primary_id": primary_id,
+            "expiration": lease.expiration.isoformat()
+        })
         
         return primary_id
     
@@ -385,59 +452,472 @@ class MasterMetadata:
         """
         Carga metadatos desde un snapshot en disco.
         
+        Si existe un snapshot, lo carga y luego aplica las operaciones
+        del WAL que ocurrieron después del snapshot (replay del log).
+        
         Retorna True si se cargó exitosamente, False en caso contrario.
         """
-        if not self.snapshot_path.exists():
+        snapshot_loaded = False
+        
+        # Intentar cargar snapshot si existe
+        if self.snapshot_path.exists():
+            try:
+                with open(self.snapshot_path, 'r') as f:
+                    snapshot = json.load(f)
+                
+                # Cargar archivos
+                self.files = {}
+                for path, data in snapshot.get("files", {}).items():
+                    self.files[path] = FileMetadata(
+                        path=data["path"],
+                        chunk_handles=data["chunk_handles"],
+                        created_at=datetime.fromisoformat(data["created_at"])
+                    )
+                
+                # Cargar chunks
+                self.chunks = {}
+                for handle, data in snapshot.get("chunks", {}).items():
+                    self.chunks[handle] = ChunkMetadata(
+                        handle=data["handle"],
+                        replicas=[
+                            ChunkLocation(
+                                chunkserver_id=r["chunkserver_id"],
+                                address=r["address"]
+                            )
+                            for r in data["replicas"]
+                        ],
+                        primary_id=data.get("primary_id"),
+                        size=data.get("size", 0)
+                    )
+                
+                # Cargar chunkservers
+                self.chunkservers = {}
+                for cs_id, data in snapshot.get("chunkservers", {}).items():
+                    self.chunkservers[cs_id] = ChunkServerInfo(
+                        id=data["id"],
+                        address=data["address"],
+                        chunks=data["chunks"],
+                        last_heartbeat=datetime.fromisoformat(data["last_heartbeat"]),
+                        is_alive=data.get("is_alive", True)
+                    )
+                
+                # Reconstruir índice inverso
+                self.chunkserver_chunks = defaultdict(set)
+                for cs_id, cs_info in self.chunkservers.items():
+                    for chunk_handle in cs_info.chunks:
+                        self.chunkserver_chunks[cs_id].add(chunk_handle)
+                
+                snapshot_loaded = True
+            except Exception as e:
+                print(f"Error cargando snapshot: {e}")
+                # Si falla, empezar desde cero y usar solo el WAL
+        
+        # Replay del WAL para aplicar todas las operaciones
+        # (o todas si no había snapshot, o solo las posteriores si había)
+        self._replay_wal()
+        
+        return snapshot_loaded or len(self.files) > 0
+    
+    def _replay_wal(self):
+        """
+        Reproduce todas las operaciones del WAL.
+        
+        Esto permite recuperar el estado completo desde el log,
+        incluso si no hay snapshot o si el snapshot está desactualizado.
+        """
+        def apply_operation(op_type: OperationType, data: dict, sequence: int):
+            """Aplica una operación del WAL."""
+            try:
+                if op_type == OperationType.CREATE_FILE:
+                    path = data["path"]
+                    if path not in self.files:
+                        self.files[path] = FileMetadata(path=path)
+                
+                elif op_type == OperationType.ALLOCATE_CHUNK:
+                    path = data["path"]
+                    chunk_index = data["chunk_index"]
+                    chunk_handle = data["chunk_handle"]
+                    
+                    file_meta = self.files.get(path)
+                    if file_meta:
+                        # Asegurar que la lista es suficientemente larga
+                        while len(file_meta.chunk_handles) <= chunk_index:
+                            file_meta.chunk_handles.append(None)
+                        file_meta.chunk_handles[chunk_index] = chunk_handle
+                        
+                        # Crear metadatos del chunk
+                        replicas = [
+                            ChunkLocation(
+                                chunkserver_id=r["chunkserver_id"],
+                                address=r["address"]
+                            )
+                            for r in data["replicas"]
+                        ]
+                        
+                        chunk_meta = ChunkMetadata(
+                            handle=chunk_handle,
+                            version=data.get("version", 0),
+                            replicas=replicas,
+                            primary_id=replicas[0].chunkserver_id if replicas else None
+                        )
+                        self.chunks[chunk_handle] = chunk_meta
+                        
+                        # Actualizar índice inverso
+                        for loc in replicas:
+                            self.chunkserver_chunks[loc.chunkserver_id].add(chunk_handle)
+                
+                elif op_type == OperationType.REGISTER_CHUNKSERVER:
+                    chunkserver_id = data["chunkserver_id"]
+                    address = data["address"]
+                    chunks = data["chunks"]
+                    
+                    if chunkserver_id not in self.chunkservers:
+                        self.chunkservers[chunkserver_id] = ChunkServerInfo(
+                            id=chunkserver_id,
+                            address=address,
+                            chunks=chunks.copy()
+                        )
+                    else:
+                        cs_info = self.chunkservers[chunkserver_id]
+                        cs_info.address = address
+                        cs_info.chunks = chunks.copy()
+                    
+                    # Actualizar índice inverso
+                    self.chunkserver_chunks[chunkserver_id] = set(chunks)
+                
+                elif op_type == OperationType.GRANT_LEASE:
+                    chunk_handle = data["chunk_handle"]
+                    primary_id = data["primary_id"]
+                    expiration = datetime.fromisoformat(data["expiration"])
+                    
+                    chunk_meta = self.chunks.get(chunk_handle)
+                    if chunk_meta:
+                        chunk_meta.primary_id = primary_id
+                    
+                    lease = LeaseInfo(
+                        chunk_handle=chunk_handle,
+                        primary_id=primary_id,
+                        expiration=expiration
+                    )
+                    self.leases[chunk_handle] = lease
+                
+                elif op_type == OperationType.UPDATE_CHUNK_SIZE:
+                    chunk_handle = data["chunk_handle"]
+                    size = data["size"]
+                    
+                    chunk_meta = self.chunks.get(chunk_handle)
+                    if chunk_meta:
+                        chunk_meta.size = size
+                
+                elif op_type == OperationType.INCREMENT_VERSION:
+                    chunk_handle = data["chunk_handle"]
+                    version = data["version"]
+                    
+                    chunk_meta = self.chunks.get(chunk_handle)
+                    if chunk_meta:
+                        chunk_meta.version = version
+                
+                elif op_type == OperationType.SNAPSHOT_FILE:
+                    source_path = data["source_path"]
+                    dest_path = data["dest_path"]
+                    
+                    source_file = self.files.get(source_path)
+                    if source_file:
+                        dest_file = FileMetadata(path=dest_path)
+                        dest_file.chunk_handles = source_file.chunk_handles.copy()
+                        self.files[dest_path] = dest_file
+                        
+                        # Incrementar reference_count
+                        for chunk_handle in dest_file.chunk_handles:
+                            if chunk_handle:
+                                chunk_meta = self.chunks.get(chunk_handle)
+                                if chunk_meta:
+                                    chunk_meta.reference_count += 1
+                
+                elif op_type == OperationType.RENAME_FILE:
+                    old_path = data["old_path"]
+                    new_path = data["new_path"]
+                    
+                    if old_path in self.files:
+                        file_meta = self.files.pop(old_path)
+                        file_meta.path = new_path
+                        self.files[new_path] = file_meta
+                
+                elif op_type == OperationType.DELETE_FILE:
+                    path = data["path"]
+                    
+                    if path in self.files:
+                        file_meta = self.files.pop(path)
+                        # Decrementar reference_count
+                        for chunk_handle in file_meta.chunk_handles:
+                            if chunk_handle:
+                                chunk_meta = self.chunks.get(chunk_handle)
+                                if chunk_meta:
+                                    chunk_meta.reference_count -= 1
+                                    if chunk_meta.reference_count <= 0:
+                                        chunk_meta.garbage_since = datetime.now()
+                
+                elif op_type == OperationType.MARK_GARBAGE:
+                    chunk_handle = data["chunk_handle"]
+                    timestamp = datetime.fromisoformat(data["timestamp"])
+                    
+                    chunk_meta = self.chunks.get(chunk_handle)
+                    if chunk_meta:
+                        chunk_meta.garbage_since = timestamp
+                
+                elif op_type == OperationType.DELETE_CHUNK:
+                    chunk_handle = data["chunk_handle"]
+                    
+                    if chunk_handle in self.chunks:
+                        chunk_meta = self.chunks[chunk_handle]
+                        # Remover de índice inverso
+                        for replica in chunk_meta.replicas:
+                            if chunk_handle in self.chunkserver_chunks.get(replica.chunkserver_id, set()):
+                                self.chunkserver_chunks[replica.chunkserver_id].remove(chunk_handle)
+                        del self.chunks[chunk_handle]
+                        if chunk_handle in self.leases:
+                            del self.leases[chunk_handle]
+            
+            except Exception as e:
+                print(f"Error aplicando operación {op_type} del WAL: {e}")
+        
+        # Reproducir todas las operaciones del log
+        count = self.wal.replay_log(apply_operation)
+        if count > 0:
+            print(f"Replay del WAL: {count} operaciones aplicadas")
+    
+    def update_chunk_size(self, chunk_handle: ChunkHandle, size: int):
+        """
+        Actualiza el tamaño de un chunk.
+        
+        Útil cuando se escribe en un chunk y se necesita actualizar
+        el tamaño registrado en los metadatos.
+        """
+        chunk_meta = self.chunks.get(chunk_handle)
+        if chunk_meta:
+            chunk_meta.size = size
+            
+            # Registrar en WAL
+            self.wal.log_operation(OperationType.UPDATE_CHUNK_SIZE, {
+                "chunk_handle": chunk_handle,
+                "size": size
+            })
+    
+    def snapshot_file(self, source_path: str, dest_path: str) -> bool:
+        """
+        Crea un snapshot (copia) de un archivo usando copy-on-write.
+        
+        En GFS, los snapshots son instantáneos porque los chunks se comparten
+        hasta que se modifiquen (copy-on-write).
+        
+        Args:
+            source_path: Ruta del archivo fuente
+            dest_path: Ruta del archivo destino (snapshot)
+        
+        Retorna:
+            True si se creó exitosamente, False en caso contrario
+        """
+        source_file = self.files.get(source_path)
+        if not source_file:
             return False
         
-        try:
-            with open(self.snapshot_path, 'r') as f:
-                snapshot = json.load(f)
+        if dest_path in self.files:
+            return False  # El destino ya existe
+        
+        # Crear nuevo archivo que referencia los mismos chunks (copy-on-write)
+        dest_file = FileMetadata(path=dest_path)
+        dest_file.chunk_handles = source_file.chunk_handles.copy()  # Compartir chunks
+        
+        self.files[dest_path] = dest_file
+        
+        # Incrementar reference_count de cada chunk compartido
+        for chunk_handle in dest_file.chunk_handles:
+            if chunk_handle:
+                chunk_meta = self.chunks.get(chunk_handle)
+                if chunk_meta:
+                    chunk_meta.reference_count += 1
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.SNAPSHOT_FILE, {
+            "source_path": source_path,
+            "dest_path": dest_path
+        })
+        
+        return True
+    
+    def rename_file(self, old_path: str, new_path: str) -> bool:
+        """
+        Renombra un archivo.
+        
+        Args:
+            old_path: Ruta antigua
+            new_path: Ruta nueva
+        
+        Retorna:
+            True si se renombró exitosamente, False en caso contrario
+        """
+        if old_path not in self.files:
+            return False
+        
+        if new_path in self.files:
+            return False  # El destino ya existe
+        
+        file_meta = self.files.pop(old_path)
+        file_meta.path = new_path
+        self.files[new_path] = file_meta
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.RENAME_FILE, {
+            "old_path": old_path,
+            "new_path": new_path
+        })
+        
+        return True
+    
+    def delete_file(self, path: str) -> bool:
+        """
+        Elimina un archivo.
+        
+        Los chunks se marcarán como garbage en el próximo garbage collection
+        si no son referenciados por otros archivos (snapshots).
+        
+        Args:
+            path: Ruta del archivo a eliminar
+        
+        Retorna:
+            True si se eliminó exitosamente, False en caso contrario
+        """
+        if path not in self.files:
+            return False
+        
+        file_meta = self.files.pop(path)
+        
+        # Decrementar reference_count de chunks
+        for chunk_handle in file_meta.chunk_handles:
+            if chunk_handle:
+                chunk_meta = self.chunks.get(chunk_handle)
+                if chunk_meta:
+                    chunk_meta.reference_count -= 1
+                    # Si reference_count llega a 0, marcar para garbage collection
+                    if chunk_meta.reference_count <= 0:
+                        chunk_meta.garbage_since = datetime.now()
+                        self.wal.log_operation(OperationType.MARK_GARBAGE, {
+                            "chunk_handle": chunk_handle,
+                            "timestamp": chunk_meta.garbage_since.isoformat()
+                        })
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.DELETE_FILE, {"path": path})
+        
+        return True
+    
+    def list_directory(self, dir_path: str = "/") -> List[str]:
+        """
+        Lista archivos en un directorio.
+        
+        Args:
+            dir_path: Ruta del directorio (termina en /)
+        
+        Retorna:
+            Lista de rutas de archivos en el directorio
+        """
+        if not dir_path.endswith('/'):
+            dir_path += '/'
+        
+        if dir_path == '/':
+            # Listar todos los archivos en la raíz
+            return [path for path in self.files.keys() if '/' not in path[1:] or path.count('/') == 1]
+        else:
+            # Listar archivos en el directorio especificado
+            prefix = dir_path
+            return [path for path in self.files.keys() if path.startswith(prefix)]
+    
+    def garbage_collect_chunks(self) -> List[ChunkHandle]:
+        """
+        Identifica chunks huérfanos (no referenciados por ningún archivo).
+        
+        Retorna:
+            Lista de chunk handles marcados como garbage
+        """
+        # Obtener todos los chunks referenciados
+        referenced_chunks = set()
+        for file_meta in self.files.values():
+            for chunk_handle in file_meta.chunk_handles:
+                if chunk_handle:
+                    referenced_chunks.add(chunk_handle)
+        
+        # Encontrar chunks no referenciados
+        all_chunks = set(self.chunks.keys())
+        orphaned_chunks = all_chunks - referenced_chunks
+        
+        # Marcar para eliminación (con timestamp)
+        newly_marked = []
+        for chunk_handle in orphaned_chunks:
+            chunk_meta = self.chunks.get(chunk_handle)
+            if chunk_meta and not chunk_meta.garbage_since:
+                chunk_meta.garbage_since = datetime.now()
+                newly_marked.append(chunk_handle)
+                self.wal.log_operation(OperationType.MARK_GARBAGE, {
+                    "chunk_handle": chunk_handle,
+                    "timestamp": chunk_meta.garbage_since.isoformat()
+                })
+        
+        return newly_marked
+    
+    def get_garbage_chunks_to_delete(self, garbage_retention_days: int = 3) -> List[ChunkHandle]:
+        """
+        Retorna chunks marcados como garbage que pueden ser eliminados
+        (han estado marcados por más de garbage_retention_days días).
+        
+        Args:
+            garbage_retention_days: Días de retención antes de eliminar
+        
+        Retorna:
+            Lista de chunk handles que pueden ser eliminados
+        """
+        cutoff = datetime.now() - timedelta(days=garbage_retention_days)
+        to_delete = []
+        
+        for chunk_handle, chunk_meta in self.chunks.items():
+            if chunk_meta.garbage_since and chunk_meta.garbage_since < cutoff:
+                to_delete.append(chunk_handle)
+        
+        return to_delete
+    
+    def delete_chunk(self, chunk_handle: ChunkHandle) -> bool:
+        """
+        Elimina un chunk de los metadatos.
+        
+        Nota: Esto solo elimina de los metadatos. Los ChunkServers
+        deben eliminar los datos físicos.
+        
+        Args:
+            chunk_handle: Handle del chunk a eliminar
+        
+        Retorna:
+            True si se eliminó exitosamente
+        """
+        if chunk_handle in self.chunks:
+            chunk_meta = self.chunks[chunk_handle]
             
-            # Cargar archivos
-            self.files = {}
-            for path, data in snapshot.get("files", {}).items():
-                self.files[path] = FileMetadata(
-                    path=data["path"],
-                    chunk_handles=data["chunk_handles"],
-                    created_at=datetime.fromisoformat(data["created_at"])
-                )
+            # Remover de índice inverso
+            for replica in chunk_meta.replicas:
+                if chunk_handle in self.chunkserver_chunks.get(replica.chunkserver_id, set()):
+                    self.chunkserver_chunks[replica.chunkserver_id].remove(chunk_handle)
             
-            # Cargar chunks
-            self.chunks = {}
-            for handle, data in snapshot.get("chunks", {}).items():
-                self.chunks[handle] = ChunkMetadata(
-                    handle=data["handle"],
-                    replicas=[
-                        ChunkLocation(
-                            chunkserver_id=r["chunkserver_id"],
-                            address=r["address"]
-                        )
-                        for r in data["replicas"]
-                    ],
-                    primary_id=data.get("primary_id"),
-                    size=data.get("size", 0)
-                )
+            # Eliminar chunk
+            del self.chunks[chunk_handle]
             
-            # Cargar chunkservers
-            self.chunkservers = {}
-            for cs_id, data in snapshot.get("chunkservers", {}).items():
-                self.chunkservers[cs_id] = ChunkServerInfo(
-                    id=data["id"],
-                    address=data["address"],
-                    chunks=data["chunks"],
-                    last_heartbeat=datetime.fromisoformat(data["last_heartbeat"]),
-                    is_alive=data.get("is_alive", True)
-                )
+            # Eliminar lease si existe
+            if chunk_handle in self.leases:
+                del self.leases[chunk_handle]
             
-            # Reconstruir índice inverso
-            self.chunkserver_chunks = defaultdict(set)
-            for cs_id, cs_info in self.chunkservers.items():
-                for chunk_handle in cs_info.chunks:
-                    self.chunkserver_chunks[cs_id].add(chunk_handle)
+            # Registrar en WAL
+            self.wal.log_operation(OperationType.DELETE_CHUNK, {
+                "chunk_handle": chunk_handle
+            })
             
             return True
-        except Exception as e:
-            print(f"Error cargando snapshot: {e}")
-            return False
+        
+        return False
 

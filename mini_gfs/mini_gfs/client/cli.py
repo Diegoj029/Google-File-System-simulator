@@ -56,6 +56,24 @@ Ejemplos:
     ls_parser = subparsers.add_parser('ls', help='Listar información de un archivo')
     ls_parser.add_argument('path', help='Ruta del archivo')
     
+    # Comando snapshot
+    snapshot_parser = subparsers.add_parser('snapshot', help='Crear snapshot de un archivo')
+    snapshot_parser.add_argument('source_path', help='Ruta del archivo fuente')
+    snapshot_parser.add_argument('dest_path', help='Ruta del archivo destino (snapshot)')
+    
+    # Comando rename
+    rename_parser = subparsers.add_parser('rename', help='Renombrar un archivo')
+    rename_parser.add_argument('old_path', help='Ruta antigua')
+    rename_parser.add_argument('new_path', help='Ruta nueva')
+    
+    # Comando delete
+    delete_parser = subparsers.add_parser('delete', help='Eliminar un archivo')
+    delete_parser.add_argument('path', help='Ruta del archivo a eliminar')
+    
+    # Comando listdir
+    listdir_parser = subparsers.add_parser('listdir', help='Listar archivos en un directorio')
+    listdir_parser.add_argument('dir_path', nargs='?', default='/', help='Ruta del directorio (default: /)')
+    
     args = parser.parse_args()
     
     if not args.command:
@@ -123,6 +141,43 @@ Ejemplos:
                     print(f"      Réplica {j+1}: {replica['chunkserver_id']} @ {replica['address']}")
         else:
             print(f"Error: Archivo {args.path} no encontrado")
+            sys.exit(1)
+    
+    elif args.command == 'snapshot':
+        success = client.snapshot_file(args.source_path, args.dest_path)
+        if success:
+            print(f"Snapshot creado: {args.dest_path} (de {args.source_path})")
+        else:
+            print(f"Error: No se pudo crear el snapshot")
+            sys.exit(1)
+    
+    elif args.command == 'rename':
+        success = client.rename_file(args.old_path, args.new_path)
+        if success:
+            print(f"Archivo renombrado: {args.old_path} -> {args.new_path}")
+        else:
+            print(f"Error: No se pudo renombrar el archivo")
+            sys.exit(1)
+    
+    elif args.command == 'delete':
+        success = client.delete_file(args.path)
+        if success:
+            print(f"Archivo {args.path} eliminado exitosamente")
+        else:
+            print(f"Error: No se pudo eliminar el archivo {args.path}")
+            sys.exit(1)
+    
+    elif args.command == 'listdir':
+        files = client.list_directory(args.dir_path)
+        if files is not None:
+            if files:
+                print(f"Archivos en {args.dir_path}:")
+                for file_path in files:
+                    print(f"  {file_path}")
+            else:
+                print(f"Directorio {args.dir_path} está vacío")
+        else:
+            print(f"Error: No se pudo listar el directorio {args.dir_path}")
             sys.exit(1)
 
 

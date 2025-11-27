@@ -48,6 +48,10 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
             response = self._handle_append_record(data)
         elif path == '/clone_chunk':
             response = self._handle_clone_chunk(data)
+        elif path == '/delete_chunk':
+            response = self._handle_delete_chunk(data)
+        elif path == '/write_chunk_pipeline':
+            response = self._handle_write_chunk_pipeline(data)
         else:
             self._send_error(404, f"Unknown endpoint: {path}")
             return
@@ -144,6 +148,43 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
         return {
             "success": success,
             "message": "Clone successful" if success else "Clone failed"
+        }
+    
+    def _handle_delete_chunk(self, data: dict) -> dict:
+        """Maneja eliminación de chunk."""
+        chunk_handle = data.get('chunk_handle')
+        
+        if chunk_handle is None:
+            return {"success": False, "message": "Missing chunk_handle"}
+        
+        success = self.chunkserver.delete_chunk(chunk_handle)
+        
+        return {
+            "success": success,
+            "message": "Chunk deleted" if success else "Delete failed"
+        }
+    
+    def _handle_write_chunk_pipeline(self, data: dict) -> dict:
+        """Maneja escritura en chunk desde pipeline (otro ChunkServer)."""
+        chunk_handle = data.get('chunk_handle')
+        offset = data.get('offset')
+        data_b64 = data.get('data')
+        src_address = data.get('src_address')  # Opcional: para pipeline
+        
+        if chunk_handle is None or offset is None or data_b64 is None:
+            return {"success": False, "message": "Missing required fields"}
+        
+        try:
+            chunk_data = base64.b64decode(data_b64)
+        except Exception as e:
+            return {"success": False, "message": f"Invalid base64 data: {e}"}
+        
+        bytes_written = self.chunkserver.write_chunk(chunk_handle, offset, chunk_data)
+        
+        return {
+            "success": True,
+            "message": "Write successful",
+            "bytes_written": bytes_written
         }
     
     def _send_json_response(self, data: dict):

@@ -29,12 +29,15 @@ class ChunkMetadata:
     En GFS, el Master mantiene información sobre cada chunk:
     - Dónde están las réplicas (chunkservers)
     - Cuál es el primary (si hay lease activo)
-    - Versión del chunk (simplificado, no implementamos versiones)
+    - Versión del chunk (se incrementa en cada mutación)
     """
     handle: ChunkHandle
+    version: int = 0  # Versión del chunk (se incrementa en mutaciones)
     replicas: List[ChunkLocation] = field(default_factory=list)
     primary_id: Optional[str] = None  # ID del chunkserver que es primary
     size: int = 0  # Tamaño actual del chunk en bytes
+    reference_count: int = 1  # Número de archivos que referencian este chunk (para snapshots)
+    garbage_since: Optional[datetime] = None  # Timestamp cuando se marcó como garbage (None si no es garbage)
 
 
 @dataclass
@@ -70,6 +73,7 @@ class ChunkServerInfo:
     """Información de un ChunkServer registrado en el Master"""
     id: str
     address: str
+    rack_id: str = "default"  # ID del rack donde está ubicado el ChunkServer
     last_heartbeat: datetime = field(default_factory=datetime.now)
     chunks: List[ChunkHandle] = field(default_factory=list)
     is_alive: bool = True

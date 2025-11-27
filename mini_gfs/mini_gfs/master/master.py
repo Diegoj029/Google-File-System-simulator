@@ -50,6 +50,8 @@ class Master:
         if self._background_thread:
             self._background_thread.join(timeout=5)
         self.metadata.save_snapshot()
+        # Cerrar WAL para asegurar que todos los datos estén escritos
+        self.metadata.wal.close()
         print("Master detenido")
     
     def _background_worker(self):
@@ -58,9 +60,12 @@ class Master:
         - Detección de chunkservers muertos
         - Re-replicación de chunks
         - Guardado periódico de snapshot
+        - Garbage collection
         """
         last_snapshot_time = time.time()
+        last_gc_time = time.time()
         snapshot_interval = 60  # Guardar snapshot cada 60 segundos
+        gc_interval = 3600  # Garbage collection cada hora
         
         while self.running:
             try:
@@ -85,8 +90,26 @@ class Master:
                         )
                         thread.start()
                 
-                # Guardar snapshot periódicamente
+                # Garbage collection periódico
                 current_time = time.time()
+                if current_time - last_gc_time >= gc_interval:
+                    with self._lock:
+                        # Marcar chunks huérfanos
+                        newly_marked = self.metadata.garbage_collect_chunks()
+                        if newly_marked:
+                            print(f"Chunks marcados como garbage: {len(newly_marked)}")
+                        
+                        # Eliminar chunks marcados hace más de 3 días
+                        to_delete = self.metadata.get_garbage_chunks_to_delete(garbage_retention_days=3)
+                        for chunk_handle in to_delete:
+                            self._delete_chunk_from_chunkservers(chunk_handle)
+                            self.metadata.delete_chunk(chunk_handle)
+                        if to_delete:
+                            print(f"Chunks eliminados: {len(to_delete)}")
+                    
+                    last_gc_time = current_time
+                
+                # Guardar snapshot periódicamente
                 if current_time - last_snapshot_time >= snapshot_interval:
                     self.metadata.save_snapshot()
                     last_snapshot_time = current_time
@@ -186,10 +209,16 @@ class Master:
                 "primary_id": primary_id
             }
     
-    def register_chunkserver(self, chunkserver_id: str, address: str, chunks: List[ChunkHandle]) -> bool:
+    def register_chunkserver(self, chunkserver_id: str, address: str, chunks: List[ChunkHandle], rack_id: str = "default") -> bool:
         """Registra un ChunkServer."""
         with self._lock:
-            return self.metadata.register_chunkserver(chunkserver_id, address, chunks)
+            # Guardar rack_id temporalmente para que register_chunkserver lo use
+            self.metadata._last_rack_id = rack_id
+            result = self.metadata.register_chunkserver(chunkserver_id, address, chunks)
+            # Actualizar rack_id si el chunkserver ya existía
+            if chunkserver_id in self.metadata.chunkservers:
+                self.metadata.chunkservers[chunkserver_id].rack_id = rack_id
+            return result
     
     def handle_heartbeat(self, chunkserver_id: str, chunks: List[ChunkHandle]) -> bool:
         """Procesa un heartbeat de un ChunkServer."""
@@ -240,4 +269,47 @@ class Master:
                     print(f"Error re-replicando chunk {chunk_handle}: {result.get('message')}")
         except Exception as e:
             print(f"Error re-replicando chunk {chunk_handle}: {e}")
+    
+    def _delete_chunk_from_chunkservers(self, chunk_handle: ChunkHandle):
+        """Envía comando de eliminación a todos los ChunkServers que tienen el chunk."""
+        import requests
+        
+        with self._lock:
+            chunk_meta = self.metadata.get_chunk_locations(chunk_handle)
+            if not chunk_meta:
+                return
+            
+            for replica in chunk_meta.replicas:
+                try:
+                    response = requests.post(
+                        f"{replica.address}/delete_chunk",
+                        json={"chunk_handle": chunk_handle},
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        result = response.json()
+                        if not result.get("success"):
+                            print(f"Warning: Error eliminando chunk {chunk_handle} de {replica.chunkserver_id}")
+                except Exception as e:
+                    print(f"Error eliminando chunk {chunk_handle} de {replica.chunkserver_id}: {e}")
+    
+    def snapshot_file(self, source_path: str, dest_path: str) -> bool:
+        """Crea un snapshot de un archivo."""
+        with self._lock:
+            return self.metadata.snapshot_file(source_path, dest_path)
+    
+    def rename_file(self, old_path: str, new_path: str) -> bool:
+        """Renombra un archivo."""
+        with self._lock:
+            return self.metadata.rename_file(old_path, new_path)
+    
+    def delete_file(self, path: str) -> bool:
+        """Elimina un archivo."""
+        with self._lock:
+            return self.metadata.delete_file(path)
+    
+    def list_directory(self, dir_path: str = "/") -> List[str]:
+        """Lista archivos en un directorio."""
+        with self._lock:
+            return self.metadata.list_directory(dir_path)
 

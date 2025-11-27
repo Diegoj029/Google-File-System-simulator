@@ -52,6 +52,14 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
             response = self._handle_allocate_chunk(data)
         elif path == '/get_chunk_locations':
             response = self._handle_get_chunk_locations(data)
+        elif path == '/snapshot_file':
+            response = self._handle_snapshot_file(data)
+        elif path == '/rename_file':
+            response = self._handle_rename_file(data)
+        elif path == '/delete_file':
+            response = self._handle_delete_file(data)
+        elif path == '/list_directory':
+            response = self._handle_list_directory(data)
         else:
             self._send_error(404, f"Unknown endpoint: {path}")
             return
@@ -63,11 +71,12 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
         chunkserver_id = data.get('chunkserver_id')
         address = data.get('address')
         chunks = data.get('chunks', [])
+        rack_id = data.get('rack_id', 'default')
         
         if not chunkserver_id or not address:
             return {"success": False, "message": "Missing chunkserver_id or address"}
         
-        success = self.master.register_chunkserver(chunkserver_id, address, chunks)
+        success = self.master.register_chunkserver(chunkserver_id, address, chunks, rack_id)
         return {
             "success": success,
             "message": "Registered successfully" if success else "Registration failed"
@@ -169,6 +178,58 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
             "chunk_handle": locations["chunk_handle"],
             "replicas": locations["replicas"],
             "primary_id": locations["primary_id"]
+        }
+    
+    def _handle_snapshot_file(self, data: dict) -> dict:
+        """Maneja creación de snapshot de archivo."""
+        source_path = data.get('source_path')
+        dest_path = data.get('dest_path')
+        
+        if not source_path or not dest_path:
+            return {"success": False, "message": "Missing source_path or dest_path"}
+        
+        success = self.master.snapshot_file(source_path, dest_path)
+        return {
+            "success": success,
+            "message": "Snapshot created" if success else "Snapshot failed"
+        }
+    
+    def _handle_rename_file(self, data: dict) -> dict:
+        """Maneja renombrado de archivo."""
+        old_path = data.get('old_path')
+        new_path = data.get('new_path')
+        
+        if not old_path or not new_path:
+            return {"success": False, "message": "Missing old_path or new_path"}
+        
+        success = self.master.rename_file(old_path, new_path)
+        return {
+            "success": success,
+            "message": "File renamed" if success else "Rename failed"
+        }
+    
+    def _handle_delete_file(self, data: dict) -> dict:
+        """Maneja eliminación de archivo."""
+        path = data.get('path')
+        
+        if not path:
+            return {"success": False, "message": "Missing path"}
+        
+        success = self.master.delete_file(path)
+        return {
+            "success": success,
+            "message": "File deleted" if success else "Delete failed"
+        }
+    
+    def _handle_list_directory(self, data: dict) -> dict:
+        """Maneja listado de directorio."""
+        dir_path = data.get('dir_path', '/')
+        
+        files = self.master.list_directory(dir_path)
+        return {
+            "success": True,
+            "dir_path": dir_path,
+            "files": files
         }
     
     def _send_json_response(self, data: dict):

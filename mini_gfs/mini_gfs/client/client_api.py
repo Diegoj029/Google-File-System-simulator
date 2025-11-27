@@ -190,48 +190,62 @@ class ClientAPI:
             print(f"Error: No se encontró dirección del primary")
             return False
         
-        # Enviar datos a todas las réplicas (data push)
+        # Data pipeline: Cliente → Réplica1 → Réplica2 → Réplica3
+        # Esto reduce el ancho de banda del cliente
         data_b64 = base64.b64encode(data).decode('utf-8')
         
-        # Primero enviar datos a todas las réplicas
+        # Ordenar réplicas: primary primero, luego otras
+        primary_replica = None
+        secondary_replicas = []
         for replica in replicas:
-            try:
-                response = requests.post(
-                    f"{replica['address']}/write_chunk",
-                    json={
-                        "chunk_handle": chunk_handle,
-                        "offset": offset_in_chunk,
-                        "data": data_b64
-                    },
-                    timeout=30
-                )
-                
-                if response.status_code != 200:
-                    print(f"Warning: Error enviando datos a réplica {replica['chunkserver_id']}")
-            except Exception as e:
-                print(f"Warning: Error enviando datos a réplica {replica['chunkserver_id']}: {e}")
+            if replica["chunkserver_id"] == primary_id:
+                primary_replica = replica
+            else:
+                secondary_replicas.append(replica)
         
-        # El primary coordina la escritura (en GFS real, el primary aplica en orden
-        # y replica a secondaries, pero aquí simplificamos)
-        try:
-            response = requests.post(
-                f"{primary_address}/write_chunk",
-                json={
-                    "chunk_handle": chunk_handle,
-                    "offset": offset_in_chunk,
-                    "data": data_b64
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("success", False)
-            
-            return False
-        except Exception as e:
-            print(f"Error escribiendo en primary: {e}")
-            return False
+        # Ordenar: primary primero, luego secondaries
+        replicas_ordered = [primary_replica] + secondary_replicas if primary_replica else secondary_replicas
+        
+        # Enviar datos en pipeline
+        last_success = False
+        for i, replica in enumerate(replicas_ordered):
+            try:
+                if i == 0:
+                    # Primera réplica recibe del cliente
+                    response = requests.post(
+                        f"{replica['address']}/write_chunk",
+                        json={
+                            "chunk_handle": chunk_handle,
+                            "offset": offset_in_chunk,
+                            "data": data_b64
+                        },
+                        timeout=30
+                    )
+                else:
+                    # Réplicas siguientes reciben de la anterior (pipeline)
+                    prev_replica = replicas_ordered[i-1]
+                    response = requests.post(
+                        f"{replica['address']}/write_chunk_pipeline",
+                        json={
+                            "chunk_handle": chunk_handle,
+                            "offset": offset_in_chunk,
+                            "data": data_b64,
+                            "src_address": prev_replica['address']
+                        },
+                        timeout=30
+                    )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    last_success = result.get("success", False)
+                else:
+                    last_success = False
+                    print(f"Warning: Error en pipeline a réplica {replica['chunkserver_id']}")
+            except Exception as e:
+                print(f"Warning: Error en pipeline a réplica {replica['chunkserver_id']}: {e}")
+                last_success = False
+        
+        return last_success
     
     def read(self, path: str, offset: int, length: int) -> Optional[bytes]:
         """
@@ -389,4 +403,83 @@ class ClientAPI:
         except Exception as e:
             print(f"Error en append: {e}")
             return False
+    
+    def snapshot_file(self, source_path: str, dest_path: str) -> bool:
+        """Crea un snapshot de un archivo."""
+        try:
+            response = requests.post(
+                f"{self.master_address}/snapshot_file",
+                json={
+                    "source_path": source_path,
+                    "dest_path": dest_path
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("success", False)
+            
+            return False
+        except Exception as e:
+            print(f"Error creando snapshot: {e}")
+            return False
+    
+    def rename_file(self, old_path: str, new_path: str) -> bool:
+        """Renombra un archivo."""
+        try:
+            response = requests.post(
+                f"{self.master_address}/rename_file",
+                json={
+                    "old_path": old_path,
+                    "new_path": new_path
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("success", False)
+            
+            return False
+        except Exception as e:
+            print(f"Error renombrando archivo: {e}")
+            return False
+    
+    def delete_file(self, path: str) -> bool:
+        """Elimina un archivo."""
+        try:
+            response = requests.post(
+                f"{self.master_address}/delete_file",
+                json={"path": path},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("success", False)
+            
+            return False
+        except Exception as e:
+            print(f"Error eliminando archivo: {e}")
+            return False
+    
+    def list_directory(self, dir_path: str = "/") -> Optional[List[str]]:
+        """Lista archivos en un directorio."""
+        try:
+            response = requests.post(
+                f"{self.master_address}/list_directory",
+                json={"dir_path": dir_path},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    return result.get("files", [])
+            
+            return None
+        except Exception as e:
+            print(f"Error listando directorio: {e}")
+            return None
 

@@ -8,7 +8,21 @@ Este es un proyecto educativo que implementa los conceptos principales de GFS de
 - Un Cliente CLI para operaciones de archivos
 - Replicación, leases con primary chunkserver para escrituras, y record append simplificado
 
+## Guía Rápida
+
+**¿Quieres probar toda la funcionalidad?** Consulta la **[Guía Rápida (QUICKGUIDE.md)](QUICKGUIDE.md)** con más de 25 ejemplos prácticos y escenarios de prueba que cubren todas las funcionalidades del simulador, incluyendo operaciones básicas, características avanzadas, pruebas de recuperación, concurrencia y replicación.
+
+---
+
+## Stack Tecnológico
+
+**Python 3.11+** | **requests**, **pyyaml** | **HTTP/JSON** | **Threading** | **WAL + Snapshots JSON**
+
+---
+
 ## Características
+
+### Características Principales
 
 - **Master único**: Coordina todas las operaciones y mantiene metadatos en memoria
 - **ChunkServers múltiples**: Almacenan chunks replicados en disco local
@@ -17,6 +31,17 @@ Este es un proyecto educativo que implementa los conceptos principales de GFS de
 - **Record Append**: Operación atómica para añadir records al final de archivos
 - **Detección de fallos**: El Master detecta ChunkServers muertos mediante heartbeats
 - **Re-replicación**: Automática cuando un chunk tiene menos réplicas de las requeridas
+
+### Características Avanzadas (Implementadas)
+
+- **Versionado de chunks**: Cada chunk tiene un número de versión que se incrementa en mutaciones para detectar réplicas obsoletas
+- **Checksums de integridad**: Verificación de integridad de datos mediante checksums de 32 bits por bloques de 64KB
+- **Snapshot de archivos**: Creación instantánea de snapshots usando copy-on-write
+- **Garbage collection**: Eliminación automática de chunks huérfanos
+- **Data pipeline**: Transferencia eficiente de datos en cadena (Cliente → Réplica1 → Réplica2 → Réplica3)
+- **Awareness de racks**: Distribución de réplicas entre racks diferentes para tolerancia a fallos
+- **Operaciones de namespace**: Rename, delete y list de archivos/directorios
+- **Tamaño de chunk configurable**: 64 MB por defecto (como en GFS original)
 
 ## Requisitos
 
@@ -132,6 +157,18 @@ python3 mini_gfs/run_client.py read /test.txt 0 12
 # Añadir datos al final (record append)
 python3 mini_gfs/run_client.py append /test.txt "More data here"
 
+# Crear snapshot de archivo
+python3 mini_gfs/run_client.py snapshot /test.txt /test.txt.snapshot
+
+# Renombrar archivo
+python3 mini_gfs/run_client.py rename /test.txt /renamed.txt
+
+# Listar archivos en directorio
+python3 mini_gfs/run_client.py listdir /
+
+# Eliminar archivo
+python3 mini_gfs/run_client.py delete /renamed.txt
+
 # Listar información del archivo
 python3 mini_gfs/run_client.py ls /test.txt
 ```
@@ -217,10 +254,16 @@ Los archivos de configuración están en `configs/`:
 
 ### Parámetros importantes:
 
-- `chunk_size`: Tamaño de cada chunk (por defecto 1 MB)
+- `chunk_size`: Tamaño de cada chunk (por defecto 64 MB, como en GFS original)
 - `replication_factor`: Número de réplicas por chunk (por defecto 3)
 - `heartbeat_timeout`: Tiempo antes de considerar un ChunkServer muerto (segundos)
 - `lease_duration`: Duración de los leases (segundos)
+- `wal_dir`: Directorio donde se guarda el Write-Ahead Log (por defecto `data/master`)
+- `wal_file`: Nombre del archivo WAL (por defecto `wal.log`)
+
+### Configuración de ChunkServer:
+
+- `rack_id`: ID del rack donde está ubicado el ChunkServer (por defecto "default")
 
 ## Arquitectura
 
@@ -228,24 +271,29 @@ Los archivos de configuración están en `configs/`:
 
 - Mantiene metadatos en memoria:
   - Namespace de archivos (path -> FileMetadata)
-  - Mapeo de chunks (chunk_handle -> ChunkMetadata)
-  - Información de ChunkServers
+  - Mapeo de chunks (chunk_handle -> ChunkMetadata) con versionado
+  - Información de ChunkServers con awareness de racks
   - Leases activos
 - Persiste metadatos periódicamente a disco (JSON snapshot)
 - Coordina operaciones de archivos
-- Gestiona réplicas y leases
+- Gestiona réplicas y leases con versionado
 - Detecta fallos y coordina re-replicación
+- **Garbage collection**: Identifica y elimina chunks huérfanos automáticamente
 - **Servidor HTTP con threading**: Maneja peticiones concurrentes usando `ThreadingTCPServer`
-- **Background worker**: Thread separado para tareas periódicas (detección de fallos, re-replicación, snapshots)
+- **Background worker**: Thread separado para tareas periódicas (detección de fallos, re-replicación, snapshots, garbage collection)
 - **Sincronización**: Usa `RLock` (reentrant lock) para permitir llamadas anidadas seguras
 
 ### ChunkServer
 
 - Almacena chunks en disco local (un archivo por chunk: `<chunk_handle>.chunk`)
-- Se registra con el Master al iniciar
+- **Checksums de integridad**: Mantiene checksums de 32 bits por bloques de 64KB
+- Verifica checksums en cada lectura para detectar corrupción
+- Se registra con el Master al iniciar (incluye `rack_id`)
 - Envía heartbeats periódicos al Master (cada 10 segundos por defecto)
 - Responde a peticiones de lectura/escritura
+- Soporta data pipeline para escrituras eficientes
 - Puede clonar chunks desde otros ChunkServers para re-replicación
+- Puede eliminar chunks localmente cuando se marcan como garbage
 - **Servidor HTTP con threading**: Maneja múltiples peticiones concurrentes
 - **Thread de heartbeat**: Envía heartbeats periódicos sin bloquear el servidor principal
 
@@ -253,27 +301,34 @@ Los archivos de configuración están en `configs/`:
 
 - Se comunica con el Master para metadatos
 - Se comunica con ChunkServers para datos
-- Coordina operaciones de escritura (data push a todas las réplicas)
-- Lee de cualquier réplica disponible
+- **Data pipeline**: Envía datos en cadena (Cliente → Réplica1 → Réplica2 → Réplica3) para eficiencia
+- Lee de cualquier réplica disponible (con verificación de checksums)
 - **Asignación automática de chunks**: Si un archivo no tiene chunks, los asigna automáticamente al escribir
+- Soporta operaciones de namespace: snapshot, rename, delete, list
 
 ## API HTTP
 
 ### Master API
 
-- `POST /register_chunkserver`: Registro de ChunkServer
+- `POST /register_chunkserver`: Registro de ChunkServer (incluye `rack_id`)
 - `POST /heartbeat`: Heartbeat de ChunkServer
 - `POST /create_file`: Crear archivo
 - `POST /get_file_info`: Obtener información de archivo
 - `POST /allocate_chunk`: Asignar nuevo chunk
 - `POST /get_chunk_locations`: Obtener ubicaciones de chunk
+- `POST /snapshot_file`: Crear snapshot de archivo
+- `POST /rename_file`: Renombrar archivo
+- `POST /delete_file`: Eliminar archivo
+- `POST /list_directory`: Listar archivos en directorio
 
 ### ChunkServer API
 
 - `POST /write_chunk`: Escribir en chunk
-- `POST /read_chunk`: Leer de chunk
+- `POST /write_chunk_pipeline`: Escribir en chunk desde pipeline (otro ChunkServer)
+- `POST /read_chunk`: Leer de chunk (con verificación de checksums)
 - `POST /append_record`: Añadir record al final
 - `POST /clone_chunk`: Clonar chunk desde otro ChunkServer
+- `POST /delete_chunk`: Eliminar chunk localmente
 
 ## Testing
 
@@ -295,16 +350,24 @@ Los tests actuales cubren:
 
 Este es un proyecto educativo, no un sistema de producción. Las siguientes simplificaciones se aplican:
 
-- No hay snapshots de archivos
-- No hay renombrado de archivos
-- No hay ACLs jerárquicos
-- No hay checksums ni verificación de integridad
-- No hay awareness de racks
-- No hay garbage collection distribuido
-- La persistencia de metadatos es un simple JSON (no logs de operaciones)
-- La re-replicación es síncrona y simplificada
-- El tamaño de chunk es fijo (1 MB por defecto, no 64 MB como en GFS real)
-- No hay optimizaciones de red (data pipeline simplificado)
+### Simplificaciones intencionales (para hacer el proyecto más útil y educativo):
+
+- **Write-Ahead Log (WAL) implementado**: El Master registra todas las operaciones de mutación en un log antes de aplicarlas, permitiendo recuperación ante fallos. Similar al GFS real.
+- **Recuperación desde WAL**: El sistema puede recuperar el estado completo desde el log de operaciones, incluso si el snapshot está desactualizado.
+- **Snapshots periódicos**: El Master guarda snapshots periódicos de metadatos para recuperación rápida.
+- **Re-replicación automática**: Cuando un ChunkServer falla, el sistema detecta chunks con réplicas insuficientes y los re-replica automáticamente.
+- **Leases con primary chunkserver**: Implementación completa del sistema de leases para coordinar escrituras.
+- **Record append atómico**: Operación atómica para añadir records al final de archivos, similar a GFS.
+
+### Limitaciones (no implementadas por simplicidad):
+
+- No hay ACLs jerárquicos (control de acceso)
+- No hay replicación del Master (shadow masters) - single point of failure
+  - *Nota: Los shadow masters son una extensión avanzada que requiere sincronización compleja del WAL*
+- La re-replicación es síncrona y simplificada (no hay pipeline de datos en re-replicación)
+- No hay compresión de datos
+- No hay streaming optimizado para archivos muy grandes
+- El sistema de versiones no se sincroniza completamente con ChunkServers (simplificado)
 
 ## Detalles de Implementación
 
@@ -324,9 +387,19 @@ Este es un proyecto educativo, no un sistema de producción. Las siguientes simp
 
 ### Persistencia
 
-- El Master guarda snapshots periódicos de metadatos en `data/master/metadata_snapshot.json`
-- Los chunks se almacenan como archivos individuales en disco
-- No hay logs de operaciones (WAL) - solo snapshots periódicos
+- **Write-Ahead Log (WAL)**: El Master registra todas las operaciones de mutación en `data/master/wal.log` antes de aplicarlas a los metadatos en memoria. Esto permite:
+  - Recuperación completa del estado desde el log
+  - Durabilidad de las operaciones (fsync después de cada escritura)
+  - Replay de operaciones después de un fallo
+  
+- **Snapshots periódicos**: El Master guarda snapshots periódicos de metadatos en `data/master/metadata_snapshot.json` para recuperación rápida. Los snapshots se combinan con el WAL para recuperación completa.
+
+- **Almacenamiento de chunks**: Los chunks se almacenan como archivos individuales en disco en cada ChunkServer (`<chunk_handle>.chunk`)
+
+- **Recuperación**: Al iniciar, el Master:
+  1. Carga el snapshot más reciente (si existe)
+  2. Reproduce todas las operaciones del WAL para aplicar cambios posteriores al snapshot
+  3. Esto garantiza que no se pierdan operaciones incluso si el snapshot está desactualizado
 
 ## Referencias
 

@@ -77,7 +77,8 @@ class ChunkServer:
                 json={
                     "chunkserver_id": self.config.chunkserver_id,
                     "address": address,
-                    "chunks": chunks
+                    "chunks": chunks,
+                    "rack_id": self.config.rack_id
                 },
                 timeout=10
             )
@@ -152,4 +153,9 @@ class ChunkServer:
     def list_chunks(self) -> List[ChunkHandle]:
         """Retorna lista de chunks almacenados localmente."""
         return self.storage.list_chunks()
+    
+    def delete_chunk(self, chunk_handle: ChunkHandle) -> bool:
+        """Elimina un chunk localmente."""
+        with self._lock:
+            return self.storage.delete_chunk(chunk_handle)
 
