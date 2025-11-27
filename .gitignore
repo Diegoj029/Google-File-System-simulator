@@ -40,6 +40,10 @@ data/
 # Logs
 *.log
 
+# Scripts de pruebas
+run_all_tests.sh
+test_results.log
+
 # OS
 .DS_Store
 Thumbs.db

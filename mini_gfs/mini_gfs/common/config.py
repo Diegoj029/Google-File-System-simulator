@@ -17,7 +17,7 @@ class MasterConfig:
     port: int = 8000
     metadata_dir: str = "data/master"
     snapshot_file: str = "metadata_snapshot.json"
-    chunk_size: int = 64 * 1024 * 1024  # 64 MB (como en GFS original)
+    chunk_size: int = 1 * 1024 * 1024  # 1 MB (para simulación, GFS original usa 64 MB)
     replication_factor: int = 3
     heartbeat_timeout: int = 30  # segundos
     lease_duration: int = 60  # segundos
@@ -57,7 +57,7 @@ def load_master_config(config_path: str = "configs/master.yaml") -> MasterConfig
         port=data.get("port", 8000),
         metadata_dir=data.get("metadata_dir", "data/master"),
         snapshot_file=data.get("snapshot_file", "metadata_snapshot.json"),
-        chunk_size=data.get("chunk_size", 64 * 1024 * 1024),
+        chunk_size=data.get("chunk_size", 1 * 1024 * 1024),  # 1 MB por defecto para simulación
         replication_factor=data.get("replication_factor", 3),
         heartbeat_timeout=data.get("heartbeat_timeout", 30),
         lease_duration=data.get("lease_duration", 60),
@@ -87,7 +87,6 @@ def load_chunkserver_config(config_path: str = "configs/chunkserver.yaml") -> Ch
         master_address=data.get("master_address", "http://localhost:8000"),
         data_dir=data.get("data_dir", "data/chunks"),
         heartbeat_interval=data.get("heartbeat_interval", 10),
-        rack_id=data.get("rack_id", "default"),
         rack_id=data.get("rack_id", "default")
     )
 

@@ -141,10 +141,10 @@ class ChunkServer:
         with self._lock:
             return self.storage.append_record(chunk_handle, data, chunk_size)
     
-    def clone_chunk(self, chunk_handle: ChunkHandle, src_address: str) -> bool:
+    def clone_chunk(self, chunk_handle: ChunkHandle, src_address: str, src_chunk_handle: Optional[ChunkHandle] = None) -> bool:
         """Clona un chunk desde otro ChunkServer."""
         with self._lock:
-            return self.storage.clone_chunk(chunk_handle, src_address)
+            return self.storage.clone_chunk(chunk_handle, src_address, src_chunk_handle)
     
     def get_chunk_size(self, chunk_handle: ChunkHandle) -> int:
         """Retorna el tamaño de un chunk."""

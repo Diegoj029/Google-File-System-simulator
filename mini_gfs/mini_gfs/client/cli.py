@@ -17,6 +17,7 @@ def main():
 Ejemplos:
   %(prog)s create /test.txt
   %(prog)s write /test.txt 0 "Hello, World!"
+  %(prog)s write /test.txt 0 --file /path/to/data.txt
   %(prog)s read /test.txt 0 12
   %(prog)s append /test.txt "More data"
   %(prog)s ls /test.txt
@@ -39,7 +40,8 @@ Ejemplos:
     write_parser = subparsers.add_parser('write', help='Escribir datos en un archivo')
     write_parser.add_argument('path', help='Ruta del archivo')
     write_parser.add_argument('offset', type=int, help='Offset en bytes')
-    write_parser.add_argument('data', help='Datos a escribir')
+    write_parser.add_argument('data', nargs='?', help='Datos a escribir (o usar --file para leer desde archivo)')
+    write_parser.add_argument('--file', '-f', help='Leer datos desde un archivo (en lugar de argumento data)')
     
     # Comando read
     read_parser = subparsers.add_parser('read', help='Leer datos de un archivo')
@@ -93,10 +95,26 @@ Ejemplos:
             sys.exit(1)
     
     elif args.command == 'write':
-        data_bytes = args.data.encode('utf-8')
+        # Leer datos desde archivo o desde argumento
+        if args.file:
+            try:
+                with open(args.file, 'rb') as f:
+                    data_bytes = f.read()
+            except FileNotFoundError:
+                print(f"Error: Archivo {args.file} no encontrado")
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error al leer archivo {args.file}: {e}")
+                sys.exit(1)
+        elif args.data:
+            data_bytes = args.data.encode('utf-8')
+        else:
+            print("Error: Debe proporcionar datos con 'data' o usar --file para leer desde archivo")
+            sys.exit(1)
+        
         success = client.write(args.path, args.offset, data_bytes)
         if success:
-            print(f"Datos escritos en {args.path} en offset {args.offset}")
+            print(f"Datos escritos en {args.path} en offset {args.offset} ({len(data_bytes)} bytes)")
         else:
             print(f"Error: No se pudieron escribir datos en {args.path}")
             sys.exit(1)

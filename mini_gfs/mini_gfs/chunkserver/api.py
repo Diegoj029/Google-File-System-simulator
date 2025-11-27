@@ -6,12 +6,23 @@ se comuniquen con este ChunkServer.
 """
 import json
 import base64
+import socket
 import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from .chunkserver import ChunkServer
 from ..common.config import MasterConfig
+
+
+class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+    """ThreadingTCPServer con SO_REUSEADDR habilitado para reutilizar puertos."""
+    allow_reuse_address = True
+    
+    def server_bind(self):
+        """Configura el socket con SO_REUSEADDR antes de hacer bind."""
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        super().server_bind()
 
 
 class ChunkServerAPIHandler(BaseHTTPRequestHandler):
@@ -28,13 +39,17 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
     
     def do_POST(self):
         """Maneja todas las peticiones POST."""
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
-        
         try:
-            data = json.loads(body.decode('utf-8'))
-        except json.JSONDecodeError:
-            self._send_error(400, "Invalid JSON")
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except json.JSONDecodeError:
+                self._send_error(400, "Invalid JSON")
+                return
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            # Cliente cerró la conexión antes de completar la petición
             return
         
         path = urlparse(self.path).path
@@ -75,10 +90,14 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
         
         bytes_written = self.chunkserver.write_chunk(chunk_handle, offset, chunk_data)
         
+        # Obtener tamaño actual del chunk después de escribir
+        current_size = self.chunkserver.get_chunk_size(chunk_handle)
+        
         return {
             "success": True,
             "message": "Write successful",
-            "bytes_written": bytes_written
+            "bytes_written": bytes_written,
+            "chunk_size": current_size
         }
     
     def _handle_read_chunk(self, data: dict) -> dict:
@@ -139,11 +158,12 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
         """Maneja clonación de chunk desde otro ChunkServer."""
         chunk_handle = data.get('chunk_handle')
         src_address = data.get('src_address')
+        src_chunk_handle = data.get('src_chunk_handle')  # Opcional, para copy-on-write
         
         if chunk_handle is None or src_address is None:
             return {"success": False, "message": "Missing chunk_handle or src_address"}
         
-        success = self.chunkserver.clone_chunk(chunk_handle, src_address)
+        success = self.chunkserver.clone_chunk(chunk_handle, src_address, src_chunk_handle)
         
         return {
             "success": success,
@@ -181,29 +201,43 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
         
         bytes_written = self.chunkserver.write_chunk(chunk_handle, offset, chunk_data)
         
+        # Obtener tamaño actual del chunk después de escribir
+        current_size = self.chunkserver.get_chunk_size(chunk_handle)
+        
         return {
             "success": True,
             "message": "Write successful",
-            "bytes_written": bytes_written
+            "bytes_written": bytes_written,
+            "chunk_size": current_size
         }
     
     def _send_json_response(self, data: dict):
         """Envía una respuesta JSON."""
-        response = json.dumps(data).encode('utf-8')
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(response)))
-        self.end_headers()
-        self.wfile.write(response)
+        try:
+            response = json.dumps(data).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            # Cliente cerró la conexión antes de recibir la respuesta
+            # Esto es normal y no requiere logging de error
+            pass
     
     def _send_error(self, code: int, message: str):
         """Envía un error HTTP."""
-        response = json.dumps({"success": False, "message": message}).encode('utf-8')
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(response)))
-        self.end_headers()
-        self.wfile.write(response)
+        try:
+            response = json.dumps({"success": False, "message": message}).encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            # Cliente cerró la conexión antes de recibir la respuesta
+            # Esto es normal y no requiere logging de error
+            pass
     
     def log_message(self, format, *args):
         """Override para logging personalizado."""
@@ -230,9 +264,9 @@ def run_chunkserver_server(chunkserver: ChunkServer, chunk_size: int,
         port: Puerto del servidor
     """
     handler = create_chunkserver_api_handler(chunkserver, chunk_size)
-    # Usar ThreadingTCPServer para manejar peticiones concurrentes
-    server = socketserver.ThreadingTCPServer((host, port), handler)
-    server.allow_reuse_address = True
+    # Usar ReusableThreadingTCPServer para manejar peticiones concurrentes
+    # y permitir reutilización de puertos
+    server = ReusableThreadingTCPServer((host, port), handler)
     
     print(f"ChunkServer API server iniciado en http://{host}:{port}")
     

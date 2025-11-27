@@ -41,7 +41,7 @@ Este es un proyecto educativo que implementa los conceptos principales de GFS de
 - **Data pipeline**: Transferencia eficiente de datos en cadena (Cliente → Réplica1 → Réplica2 → Réplica3)
 - **Awareness de racks**: Distribución de réplicas entre racks diferentes para tolerancia a fallos
 - **Operaciones de namespace**: Rename, delete y list de archivos/directorios
-- **Tamaño de chunk configurable**: 64 MB por defecto (como en GFS original)
+- **Tamaño de chunk configurable**: 1 MB por defecto para esta simulación (GFS original usa 64 MB)
 
 ## Requisitos
 
@@ -254,7 +254,7 @@ Los archivos de configuración están en `configs/`:
 
 ### Parámetros importantes:
 
-- `chunk_size`: Tamaño de cada chunk (por defecto 64 MB, como en GFS original)
+- `chunk_size`: Tamaño de cada chunk (por defecto 1 MB para esta simulación, GFS original usa 64 MB)
 - `replication_factor`: Número de réplicas por chunk (por defecto 3)
 - `heartbeat_timeout`: Tiempo antes de considerar un ChunkServer muerto (segundos)
 - `lease_duration`: Duración de los leases (segundos)

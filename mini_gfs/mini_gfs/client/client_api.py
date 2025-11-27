@@ -134,118 +134,204 @@ class ClientAPI:
         """
         Escribe datos en un archivo.
         
-        En GFS, el cliente:
-        1. Obtiene ubicaciones del chunk del Master
-        2. Envía datos a todas las réplicas (data push)
-        3. Instruye al primary para coordinar la escritura
+        Implementa:
+        1. Copy-on-write: Si el chunk está compartido (reference_count > 1), lo clona antes de escribir
+        2. División en múltiples chunks: Si los datos exceden el tamaño del chunk (1MB), los divide
+        3. Data pipeline: Cliente → Réplica1 → Réplica2 → Réplica3
         """
-        # Encontrar chunk
-        chunk_handle, offset_in_chunk = self._find_chunk_for_offset(path, offset)
+        chunk_size = self.config.chunk_size
+        data_remaining = data
+        current_offset = offset
+        overall_success = True
         
-        # Si no existe el chunk, asignarlo
-        locations = None
-        if not chunk_handle:
-            # Calcular qué chunk_index necesitamos
-            chunk_size = self.config.chunk_size
-            chunk_index = offset // chunk_size
+        # Dividir datos en múltiples chunks si es necesario
+        while len(data_remaining) > 0:
+            # Calcular qué chunk contiene este offset
+            chunk_index = current_offset // chunk_size
+            offset_in_chunk = current_offset % chunk_size
             
-            # Asignar el chunk
-            chunk_info = self.allocate_chunk(path, chunk_index)
-            if not chunk_info:
-                print(f"Error: No se pudo asignar chunk para offset {offset}")
-                return False
+            # Calcular cuántos bytes escribir en este chunk
+            bytes_in_this_chunk = min(len(data_remaining), chunk_size - offset_in_chunk)
+            chunk_data = data_remaining[:bytes_in_this_chunk]
             
-            chunk_handle = chunk_info.get("chunk_handle")
+            # Encontrar o crear el chunk
+            chunk_handle, _ = self._find_chunk_for_offset(path, current_offset)
+            
+            locations = None
+            old_chunk_handle = None
+            
             if not chunk_handle:
-                print(f"Error: No se obtuvo chunk_handle al asignar chunk")
-                return False
-            
-            # Usar la información del chunk recién asignado
-            locations = chunk_info
-            # Recalcular offset_in_chunk
-            offset_in_chunk = offset % chunk_size
-        else:
-            # Obtener ubicaciones del chunk existente
-            locations = self.get_chunk_locations(chunk_handle)
-        
-        if not locations:
-            print(f"Error: No se encontraron ubicaciones para chunk {chunk_handle}")
-            return False
-        
-        replicas = locations.get("replicas", [])
-        primary_id = locations.get("primary_id")
-        
-        if not replicas or not primary_id:
-            print(f"Error: No hay réplicas disponibles o primary no asignado")
-            return False
-        
-        # Encontrar primary
-        primary_address = None
-        for replica in replicas:
-            if replica["chunkserver_id"] == primary_id:
-                primary_address = replica["address"]
-                break
-        
-        if not primary_address:
-            print(f"Error: No se encontró dirección del primary")
-            return False
-        
-        # Data pipeline: Cliente → Réplica1 → Réplica2 → Réplica3
-        # Esto reduce el ancho de banda del cliente
-        data_b64 = base64.b64encode(data).decode('utf-8')
-        
-        # Ordenar réplicas: primary primero, luego otras
-        primary_replica = None
-        secondary_replicas = []
-        for replica in replicas:
-            if replica["chunkserver_id"] == primary_id:
-                primary_replica = replica
-            else:
-                secondary_replicas.append(replica)
-        
-        # Ordenar: primary primero, luego secondaries
-        replicas_ordered = [primary_replica] + secondary_replicas if primary_replica else secondary_replicas
-        
-        # Enviar datos en pipeline
-        last_success = False
-        for i, replica in enumerate(replicas_ordered):
-            try:
-                if i == 0:
-                    # Primera réplica recibe del cliente
-                    response = requests.post(
-                        f"{replica['address']}/write_chunk",
-                        json={
-                            "chunk_handle": chunk_handle,
-                            "offset": offset_in_chunk,
-                            "data": data_b64
-                        },
-                        timeout=30
-                    )
-                else:
-                    # Réplicas siguientes reciben de la anterior (pipeline)
-                    prev_replica = replicas_ordered[i-1]
-                    response = requests.post(
-                        f"{replica['address']}/write_chunk_pipeline",
-                        json={
-                            "chunk_handle": chunk_handle,
-                            "offset": offset_in_chunk,
-                            "data": data_b64,
-                            "src_address": prev_replica['address']
-                        },
-                        timeout=30
-                    )
+                # Asignar nuevo chunk
+                chunk_info = self.allocate_chunk(path, chunk_index)
+                if not chunk_info:
+                    print(f"Error: No se pudo asignar chunk para offset {current_offset}")
+                    overall_success = False
+                    break
                 
-                if response.status_code == 200:
-                    result = response.json()
-                    last_success = result.get("success", False)
+                chunk_handle = chunk_info.get("chunk_handle")
+                if not chunk_handle:
+                    print(f"Error: No se obtuvo chunk_handle al asignar chunk")
+                    overall_success = False
+                    break
+                
+                locations = chunk_info
+            else:
+                # Obtener ubicaciones del chunk existente
+                locations = self.get_chunk_locations(chunk_handle)
+                if not locations:
+                    print(f"Error: No se encontraron ubicaciones para chunk {chunk_handle}")
+                    overall_success = False
+                    break
+                
+                # Implementar copy-on-write si el chunk está compartido
+                reference_count = locations.get("reference_count", 1)
+                if reference_count > 1:
+                    # El chunk está compartido, clonarlo antes de escribir
+                    old_chunk_handle = chunk_handle
+                    
+                    try:
+                        response = requests.post(
+                            f"{self.master_address}/clone_shared_chunk",
+                            json={
+                                "path": path,
+                                "chunk_index": chunk_index,
+                                "old_chunk_handle": old_chunk_handle
+                            },
+                            timeout=30
+                        )
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            if result.get("success"):
+                                chunk_handle = result.get("chunk_handle")
+                                # Obtener las nuevas ubicaciones del chunk clonado
+                                locations = self.get_chunk_locations(chunk_handle)
+                                if not locations:
+                                    print(f"Error: No se encontraron ubicaciones para chunk clonado {chunk_handle}")
+                                    overall_success = False
+                                    break
+                            else:
+                                print(f"Error: No se pudo clonar chunk compartido: {result.get('message')}")
+                                overall_success = False
+                                break
+                        else:
+                            print(f"Error: Master retornó código {response.status_code} al clonar chunk")
+                            overall_success = False
+                            break
+                    except Exception as e:
+                        print(f"Error clonando chunk compartido: {e}")
+                        overall_success = False
+                        break
+            
+            replicas = locations.get("replicas", [])
+            primary_id = locations.get("primary_id")
+            
+            if not replicas or not primary_id:
+                print(f"Error: No hay réplicas disponibles o primary no asignado")
+                overall_success = False
+                break
+            
+            # Encontrar primary
+            primary_address = None
+            for replica in replicas:
+                if replica["chunkserver_id"] == primary_id:
+                    primary_address = replica["address"]
+                    break
+            
+            if not primary_address:
+                print(f"Error: No se encontró dirección del primary")
+                overall_success = False
+                break
+            
+            # Data pipeline: Cliente → Réplica1 → Réplica2 → Réplica3
+            data_b64 = base64.b64encode(chunk_data).decode('utf-8')
+            
+            # Ordenar réplicas: primary primero, luego otras
+            primary_replica = None
+            secondary_replicas = []
+            for replica in replicas:
+                if replica["chunkserver_id"] == primary_id:
+                    primary_replica = replica
                 else:
-                    last_success = False
-                    print(f"Warning: Error en pipeline a réplica {replica['chunkserver_id']}")
-            except Exception as e:
-                print(f"Warning: Error en pipeline a réplica {replica['chunkserver_id']}: {e}")
-                last_success = False
+                    secondary_replicas.append(replica)
+            
+            replicas_ordered = [primary_replica] + secondary_replicas if primary_replica else secondary_replicas
+            
+            # Obtener tamaño actual del chunk
+            current_chunk_size = locations.get("size", 0) if locations else 0
+            
+            # Enviar datos en pipeline
+            write_success = False
+            max_chunk_size = 0
+            
+            for i, replica in enumerate(replicas_ordered):
+                try:
+                    if i == 0:
+                        # Primera réplica recibe del cliente
+                        response = requests.post(
+                            f"{replica['address']}/write_chunk",
+                            json={
+                                "chunk_handle": chunk_handle,
+                                "offset": offset_in_chunk,
+                                "data": data_b64
+                            },
+                            timeout=30
+                        )
+                    else:
+                        # Réplicas siguientes reciben de la anterior (pipeline)
+                        prev_replica = replicas_ordered[i-1]
+                        response = requests.post(
+                            f"{replica['address']}/write_chunk_pipeline",
+                            json={
+                                "chunk_handle": chunk_handle,
+                                "offset": offset_in_chunk,
+                                "data": data_b64,
+                                "src_address": prev_replica['address']
+                            },
+                            timeout=30
+                        )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        write_success = result.get("success", False)
+                        chunk_size_reported = result.get("chunk_size", 0)
+                        if chunk_size_reported > max_chunk_size:
+                            max_chunk_size = chunk_size_reported
+                    else:
+                        write_success = False
+                        print(f"Warning: Error en pipeline a réplica {replica['chunkserver_id']}")
+                except Exception as e:
+                    print(f"Warning: Error en pipeline a réplica {replica['chunkserver_id']}: {e}")
+                    write_success = False
+            
+            # Actualizar tamaño del chunk en el Master
+            if write_success:
+                if max_chunk_size == 0:
+                    max_chunk_size = max(current_chunk_size, offset_in_chunk + len(chunk_data))
+                else:
+                    max_chunk_size = max(max_chunk_size, offset_in_chunk + len(chunk_data))
+                
+                try:
+                    response = requests.post(
+                        f"{self.master_address}/update_chunk_size",
+                        json={
+                            "chunk_handle": chunk_handle,
+                            "size": max_chunk_size
+                        },
+                        timeout=10
+                    )
+                    if response.status_code != 200:
+                        print(f"Warning: No se pudo actualizar tamaño del chunk en Master")
+                except Exception as e:
+                    print(f"Warning: Error actualizando tamaño del chunk: {e}")
+            else:
+                overall_success = False
+            
+            # Continuar con el siguiente chunk
+            data_remaining = data_remaining[bytes_in_this_chunk:]
+            current_offset += bytes_in_this_chunk
         
-        return last_success
+        return overall_success
     
     def read(self, path: str, offset: int, length: int) -> Optional[bytes]:
         """

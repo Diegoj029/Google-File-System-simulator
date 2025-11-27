@@ -54,7 +54,7 @@ python3 mini_gfs/run_chunkserver.py --port 8003 --id cs3 --data-dir data/chunks/
 
 ## Operaciones Básicas
 
-### QA 1: Crear y Escribir un Archivo
+### Prueba 1: Crear y Escribir un Archivo
 
 **Objetivo:** Verificar creación de archivos y escritura básica.
 
@@ -80,7 +80,7 @@ python3 mini_gfs/run_client.py ls /test1.txt
 
 ---
 
-### QA 2: Escritura en Múltiples Chunks
+### Prueba 2: Escritura en Múltiples Chunks
 
 **Objetivo:** Verificar que el sistema maneja archivos que ocupan múltiples chunks.
 
@@ -96,8 +96,8 @@ with open('/tmp/large_data.txt', 'w') as f:
     f.write(data)
 "
 
-# Escribir en el archivo (necesitarás adaptar esto según tu implementación)
-python3 mini_gfs/run_client.py write /large.txt 0 "$(cat /tmp/large_data.txt)"
+# Escribir en el archivo usando --file
+python3 mini_gfs/run_client.py write /large.txt 0 --file /tmp/large_data.txt
 
 # Ver información - debería mostrar múltiples chunks
 python3 mini_gfs/run_client.py ls /large.txt
@@ -109,7 +109,7 @@ python3 mini_gfs/run_client.py ls /large.txt
 
 ---
 
-### QA 3: Record Append (Operación Atómica)
+### Prueba 3: Record Append (Operación Atómica)
 
 **Objetivo:** Probar la operación de record append, característica clave de GFS.
 
@@ -134,170 +134,7 @@ python3 mini_gfs/run_client.py read /logs.txt 0 200
 
 ---
 
-## Operaciones Avanzadas
-
-### QA 17: Crear Snapshot de Archivo
-
-**Objetivo:** Probar la funcionalidad de snapshot con copy-on-write.
-
-```bash
-# Crear archivo original
-python3 mini_gfs/run_client.py create /original.txt
-python3 mini_gfs/run_client.py write /original.txt 0 "Datos originales"
-
-# Crear snapshot
-python3 mini_gfs/run_client.py snapshot /original.txt /snapshot.txt
-
-# Modificar archivo original
-python3 mini_gfs/run_client.py write /original.txt 0 "Datos modificados"
-
-# Verificar que el snapshot mantiene los datos originales
-python3 mini_gfs/run_client.py read /snapshot.txt 0 100
-python3 mini_gfs/run_client.py read /original.txt 0 100
-```
-
-**Resultado esperado:**
-- Snapshot creado exitosamente
-- Snapshot mantiene los datos originales
-- Modificaciones al original no afectan el snapshot (copy-on-write)
-
----
-
-### QA 18: Renombrar y Eliminar Archivos
-
-**Objetivo:** Probar operaciones de namespace.
-
-```bash
-# Crear archivo
-python3 mini_gfs/run_client.py create /temp.txt
-python3 mini_gfs/run_client.py write /temp.txt 0 "Datos temporales"
-
-# Renombrar
-python3 mini_gfs/run_client.py rename /temp.txt /renamed.txt
-
-# Verificar que el archivo renombrado existe
-python3 mini_gfs/run_client.py read /renamed.txt 0 100
-
-# Listar directorio
-python3 mini_gfs/run_client.py listdir /
-
-# Eliminar archivo
-python3 mini_gfs/run_client.py delete /renamed.txt
-
-# Verificar que fue eliminado
-python3 mini_gfs/run_client.py listdir /
-```
-
-**Resultado esperado:**
-- Archivo renombrado correctamente
-- Listado muestra archivos correctamente
-- Archivo eliminado exitosamente
-
----
-
-### QA 19: Verificar Checksums de Integridad
-
-**Objetivo:** Verificar que el sistema detecta corrupción de datos.
-
-```bash
-# Crear y escribir archivo
-python3 mini_gfs/run_client.py create /checksum_test.txt
-python3 mini_gfs/run_client.py write /checksum_test.txt 0 "Datos para verificar checksums"
-
-# Leer (debería verificar checksums automáticamente)
-python3 mini_gfs/run_client.py read /checksum_test.txt 0 100
-
-# Nota: Para probar detección de corrupción, necesitarías
-# modificar manualmente un archivo .chunk en data/chunks/
-# y luego intentar leerlo - debería fallar o reportar error
-```
-
-**Resultado esperado:**
-- Lecturas verifican checksums automáticamente
-- Sistema detecta corrupción si los datos están dañados
-
----
-
-### QA 20: Verificar Versionado de Chunks
-
-**Objetivo:** Verificar que los chunks tienen versiones que se incrementan.
-
-```bash
-# Crear archivo
-python3 mini_gfs/run_client.py create /version_test.txt
-
-# Escribir (esto incrementa la versión del chunk)
-python3 mini_gfs/run_client.py write /version_test.txt 0 "Primera escritura"
-
-# Ver información del archivo (debería mostrar versión)
-python3 mini_gfs/run_client.py ls /version_test.txt
-
-# Escribir de nuevo (incrementa versión nuevamente)
-python3 mini_gfs/run_client.py write /version_test.txt 0 "Segunda escritura"
-```
-
-**Resultado esperado:**
-- Cada mutación incrementa la versión del chunk
-- El Master mantiene la versión actual de cada chunk
-
----
-
-### QA 21: Garbage Collection Automático
-
-**Objetivo:** Verificar que los chunks huérfanos se eliminan automáticamente.
-
-```bash
-# Crear archivo
-python3 mini_gfs/run_client.py create /gc_test.txt
-python3 mini_gfs/run_client.py write /gc_test.txt 0 "Datos para GC"
-
-# Obtener información (nota los chunks)
-python3 mini_gfs/run_client.py ls /gc_test.txt
-
-# Eliminar archivo
-python3 mini_gfs/run_client.py delete /gc_test.txt
-
-# Esperar 3+ días (o modificar garbage_retention_days en el código)
-# Los chunks deberían ser eliminados automáticamente por el background worker
-```
-
-**Resultado esperado:**
-- Chunks marcados como garbage después de eliminar archivo
-- Chunks eliminados automáticamente después del período de retención
-
----
-
-### QA 22: Data Pipeline para Escrituras
-
-**Objetivo:** Verificar que las escrituras usan pipeline eficiente.
-
-```bash
-# Crear archivo
-python3 mini_gfs/run_client.py create /pipeline_test.txt
-
-# Escribir datos grandes (para observar el pipeline)
-python3 -c "
-data = 'X' * (1024 * 1024)  # 1 MB
-with open('/tmp/large_data.txt', 'w') as f:
-    f.write(data)
-"
-
-# Escribir usando pipeline (automático)
-python3 mini_gfs/run_client.py write /pipeline_test.txt 0 "$(cat /tmp/large_data.txt)"
-
-# Verificar que se escribió correctamente
-python3 mini_gfs/run_client.py read /pipeline_test.txt 0 100
-```
-
-**Resultado esperado:**
-- Escrituras usan pipeline (Cliente → Réplica1 → Réplica2 → Réplica3)
-- Datos se escriben correctamente en todas las réplicas
-
----
-
-## Escenarios de Prueba
-
-### QA 4: Escritura en Offset Específico
+### Prueba 4: Escritura en Offset Específico
 
 **Objetivo:** Verificar escritura en posiciones específicas del archivo.
 
@@ -320,7 +157,7 @@ python3 mini_gfs/run_client.py read /offset_test.txt 0 100
 
 ---
 
-### QA 5: Múltiples Archivos Simultáneos
+### Prueba 5: Múltiples Archivos Simultáneos
 
 **Objetivo:** Verificar que el sistema maneja múltiples archivos correctamente.
 
@@ -348,7 +185,7 @@ done
 
 ## Pruebas de Recuperación
 
-### QA 6: Recuperación desde WAL
+### Prueba 6: Recuperación desde WAL
 
 **Objetivo:** Verificar que el sistema se recupera correctamente desde el Write-Ahead Log.
 
@@ -378,7 +215,7 @@ python3 mini_gfs/run_client.py ls /recovery_test.txt
 
 ---
 
-### QA 7: Recuperación sin Snapshot (Solo WAL)
+### Prueba 7: Recuperación sin Snapshot (Solo WAL)
 
 **Objetivo:** Verificar recuperación completa desde el WAL cuando no hay snapshot.
 
@@ -412,7 +249,7 @@ python3 mini_gfs/run_client.py read /wal_only_test.txt 0 50
 
 ## Pruebas de Concurrencia
 
-### QA 8: Múltiples Escrituras Concurrentes
+### Prueba 8: Múltiples Escrituras Concurrentes
 
 **Objetivo:** Verificar que el sistema maneja operaciones concurrentes.
 
@@ -441,7 +278,7 @@ python3 mini_gfs/run_client.py read /concurrent.txt 0 200
 
 ---
 
-### QA 9: Múltiples Record Appends Concurrentes
+### Prueba 9: Múltiples Record Appends Concurrentes
 
 **Objetivo:** Probar record append con múltiples clientes simultáneos.
 
@@ -471,7 +308,7 @@ python3 mini_gfs/run_client.py read /concurrent_append.txt 0 500
 
 ## Pruebas de Replicación
 
-### QA 10: Fallo de ChunkServer y Re-replicación
+### Prueba 10: Fallo de ChunkServer y Re-replicación
 
 **Objetivo:** Verificar detección de fallos y re-replicación automática.
 
@@ -508,7 +345,7 @@ python3 mini_gfs/run_client.py ls /replication_test.txt
 
 ---
 
-### QA 11: Fallo Múltiple de ChunkServers
+### Prueba 11: Fallo Múltiple de ChunkServers
 
 **Objetivo:** Verificar comportamiento cuando múltiples ChunkServers fallan.
 
@@ -538,7 +375,7 @@ python3 mini_gfs/run_client.py write /multi_failure.txt 0 "Nuevos datos"
 
 ## Verificación del WAL
 
-### QA 12: Inspeccionar el Write-Ahead Log
+### Prueba 12: Inspeccionar el Write-Ahead Log
 
 **Objetivo:** Ver el contenido del WAL para entender cómo se registran las operaciones.
 
@@ -564,7 +401,7 @@ tail -n 5 data/master/wal.log | python3 -m json.tool
 
 ---
 
-### QA 13: Verificar Snapshots
+### Prueba 13: Verificar Snapshots
 
 **Objetivo:** Inspeccionar los snapshots de metadatos.
 
@@ -591,7 +428,7 @@ cat data/master/metadata_snapshot.json | python3 -m json.tool
 
 ## Escenarios Avanzados
 
-### QA 14: Archivo Grande con Múltiples Chunks
+### Prueba 14: Archivo Grande con Múltiples Chunks
 
 **Objetivo:** Probar el sistema con un archivo que ocupe muchos chunks.
 
@@ -622,7 +459,7 @@ python3 mini_gfs/run_client.py read /huge_file.txt $((1024*1024)) 100
 
 ---
 
-### QA 15: Stress Test - Múltiples Operaciones
+### Prueba 15: Stress Test - Múltiples Operaciones
 
 **Objetivo:** Probar el sistema bajo carga.
 
@@ -660,7 +497,7 @@ python3 mini_gfs/run_client.py ls /stress_test_50.txt
 
 ## Verificación de Consistencia
 
-### QA 16: Verificar Réplicas en Múltiples ChunkServers
+### Prueba 16: Verificar Réplicas en Múltiples ChunkServers
 
 **Objetivo:** Confirmar que los datos están replicados correctamente.
 
@@ -718,9 +555,170 @@ ls -lh data/chunks/cs3/*.chunk
 
 ---
 
+## Operaciones Avanzadas
+
+### Prueba 17: Crear Snapshot de Archivo
+
+**Objetivo:** Probar la funcionalidad de snapshot con copy-on-write.
+
+```bash
+# Crear archivo original
+python3 mini_gfs/run_client.py create /original1.txt
+python3 mini_gfs/run_client.py write /original1.txt 0 "Datos originales"
+
+# Crear snapshot
+python3 mini_gfs/run_client.py snapshot /original1.txt /snapshot.txt
+
+# Modificar archivo original
+python3 mini_gfs/run_client.py write /original1.txt 0 "Datos modificados"
+
+# Verificar que el snapshot mantiene los datos originales
+python3 mini_gfs/run_client.py read /snapshot.txt 0 100
+python3 mini_gfs/run_client.py read /original1.txt 0 100
+```
+
+**Resultado esperado:**
+- Snapshot creado exitosamente
+- Snapshot mantiene los datos originales
+- Modificaciones al original no afectan el snapshot (copy-on-write)
+
+---
+
+### Prueba 18: Renombrar y Eliminar Archivos
+
+**Objetivo:** Probar operaciones de namespace.
+
+```bash
+# Crear archivo
+python3 mini_gfs/run_client.py create /temp.txt
+python3 mini_gfs/run_client.py write /temp.txt 0 "Datos temporales"
+
+# Renombrar
+python3 mini_gfs/run_client.py rename /temp.txt /renamed.txt
+
+# Verificar que el archivo renombrado existe
+python3 mini_gfs/run_client.py read /renamed.txt 0 100
+
+# Listar directorio
+python3 mini_gfs/run_client.py listdir /
+
+# Eliminar archivo
+python3 mini_gfs/run_client.py delete /renamed.txt
+
+# Verificar que fue eliminado
+python3 mini_gfs/run_client.py listdir /
+```
+
+**Resultado esperado:**
+- Archivo renombrado correctamente
+- Listado muestra archivos correctamente
+- Archivo eliminado exitosamente
+
+---
+
+### Prueba 19: Verificar Checksums de Integridad
+
+**Objetivo:** Verificar que el sistema detecta corrupción de datos.
+
+```bash
+# Crear y escribir archivo
+python3 mini_gfs/run_client.py create /checksum_test.txt
+python3 mini_gfs/run_client.py write /checksum_test.txt 0 "Datos para verificar checksums"
+
+# Leer (debería verificar checksums automáticamente)
+python3 mini_gfs/run_client.py read /checksum_test.txt 0 100
+
+# Nota: Para probar detección de corrupción, necesitarías
+# modificar manualmente un archivo .chunk en data/chunks/
+# y luego intentar leerlo - debería fallar o reportar error
+```
+
+**Resultado esperado:**
+- Lecturas verifican checksums automáticamente
+- Sistema detecta corrupción si los datos están dañados
+
+---
+
+### Prueba 20: Verificar Versionado de Chunks
+
+**Objetivo:** Verificar que los chunks tienen versiones que se incrementan.
+
+```bash
+# Crear archivo
+python3 mini_gfs/run_client.py create /version_test.txt
+
+# Escribir (esto incrementa la versión del chunk)
+python3 mini_gfs/run_client.py write /version_test.txt 0 "Primera escritura"
+
+# Ver información del archivo (debería mostrar versión)
+python3 mini_gfs/run_client.py ls /version_test.txt
+
+# Escribir de nuevo (incrementa versión nuevamente)
+python3 mini_gfs/run_client.py write /version_test.txt 0 "Segunda escritura"
+```
+
+**Resultado esperado:**
+- Cada mutación incrementa la versión del chunk
+- El Master mantiene la versión actual de cada chunk
+
+---
+
+### Prueba 21: Garbage Collection Automático
+
+**Objetivo:** Verificar que los chunks huérfanos se eliminan automáticamente.
+
+```bash
+# Crear archivo
+python3 mini_gfs/run_client.py create /gc_test.txt
+python3 mini_gfs/run_client.py write /gc_test.txt 0 "Datos para GC"
+
+# Obtener información (nota los chunks)
+python3 mini_gfs/run_client.py ls /gc_test.txt
+
+# Eliminar archivo
+python3 mini_gfs/run_client.py delete /gc_test.txt
+
+# Esperar 3+ días (o modificar garbage_retention_days en el código)
+# Los chunks deberían ser eliminados automáticamente por el background worker
+```
+
+**Resultado esperado:**
+- Chunks marcados como garbage después de eliminar archivo
+- Chunks eliminados automáticamente después del período de retención
+
+---
+
+### Prueba 22: Data Pipeline para Escrituras
+
+**Objetivo:** Verificar que las escrituras usan pipeline eficiente.
+
+```bash
+# Crear archivo
+python3 mini_gfs/run_client.py create /pipeline_test.txt
+
+# Escribir datos grandes (para observar el pipeline)
+python3 -c "
+data = 'X' * (1024 * 1024)  # 1 MB
+with open('/tmp/large_data.txt', 'w') as f:
+    f.write(data)
+"
+
+# Escribir usando pipeline (automático) - usar --file para evitar problemas con argumentos largos
+python3 mini_gfs/run_client.py write /pipeline_test.txt 0 --file /tmp/large_data.txt
+
+# Verificar que se escribió correctamente
+python3 mini_gfs/run_client.py read /pipeline_test.txt 0 100
+```
+
+**Resultado esperado:**
+- Escrituras usan pipeline (Cliente → Réplica1 → Réplica2 → Réplica3)
+- Datos se escriben correctamente en todas las réplicas
+
+---
+
 ## Pruebas de Características Avanzadas
 
-### QA 23: Snapshot con Múltiples Referencias
+### Prueba 23: Snapshot con Múltiples Referencias
 
 **Objetivo:** Verificar que los snapshots comparten chunks correctamente.
 
@@ -746,7 +744,7 @@ python3 mini_gfs/run_client.py ls /snap1.txt
 
 ---
 
-### QA 24: Verificar Awareness de Racks
+### Prueba 24: Verificar Awareness de Racks
 
 **Objetivo:** Verificar que las réplicas se distribuyen entre racks.
 
@@ -768,7 +766,7 @@ python3 mini_gfs/run_client.py ls /rack_test.txt
 
 ---
 
-### QA 25: Verificar Versionado en Re-replicación
+### Prueba 25: Verificar Versionado en Re-replicación
 
 **Objetivo:** Verificar que las réplicas obsoletas se detectan por versión.
 

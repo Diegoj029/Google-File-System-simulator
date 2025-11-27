@@ -6,6 +6,7 @@ se comuniquen con el Master.
 """
 import json
 import base64
+import socket
 import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -13,6 +14,16 @@ from typing import Optional
 
 from .master import Master
 from ..common.types import ChunkHandle
+
+
+class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+    """ThreadingTCPServer con SO_REUSEADDR habilitado para reutilizar puertos."""
+    allow_reuse_address = True
+    
+    def server_bind(self):
+        """Configura el socket con SO_REUSEADDR antes de hacer bind."""
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        super().server_bind()
 
 
 class MasterAPIHandler(BaseHTTPRequestHandler):
@@ -54,12 +65,18 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
             response = self._handle_get_chunk_locations(data)
         elif path == '/snapshot_file':
             response = self._handle_snapshot_file(data)
+        elif path == '/clone_shared_chunk':
+            response = self._handle_clone_shared_chunk(data)
         elif path == '/rename_file':
             response = self._handle_rename_file(data)
         elif path == '/delete_file':
             response = self._handle_delete_file(data)
         elif path == '/list_directory':
             response = self._handle_list_directory(data)
+        elif path == '/update_chunk_size':
+            response = self._handle_update_chunk_size(data)
+        elif path == '/clone_shared_chunk':
+            response = self._handle_clone_shared_chunk(data)
         else:
             self._send_error(404, f"Unknown endpoint: {path}")
             return
@@ -177,7 +194,29 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
             "success": True,
             "chunk_handle": locations["chunk_handle"],
             "replicas": locations["replicas"],
-            "primary_id": locations["primary_id"]
+            "primary_id": locations["primary_id"],
+            "size": locations.get("size", 0),
+            "reference_count": locations.get("reference_count", 1)
+        }
+    
+    def _handle_clone_shared_chunk(self, data: dict) -> dict:
+        """Maneja clonación de chunk compartido para copy-on-write."""
+        path = data.get('path')
+        chunk_index = data.get('chunk_index')
+        old_chunk_handle = data.get('old_chunk_handle')
+        
+        if not path or chunk_index is None or not old_chunk_handle:
+            return {"success": False, "message": "Missing path, chunk_index, or old_chunk_handle"}
+        
+        new_chunk_handle = self.master.clone_shared_chunk(path, chunk_index, old_chunk_handle)
+        
+        if not new_chunk_handle:
+            return {"success": False, "message": "Failed to clone shared chunk"}
+        
+        return {
+            "success": True,
+            "chunk_handle": new_chunk_handle,
+            "message": "Chunk cloned successfully"
         }
     
     def _handle_snapshot_file(self, data: dict) -> dict:
@@ -250,6 +289,20 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response)
     
+    def _handle_update_chunk_size(self, data: dict) -> dict:
+        """Maneja actualización del tamaño de un chunk."""
+        chunk_handle = data.get('chunk_handle')
+        size = data.get('size')
+        
+        if chunk_handle is None or size is None:
+            return {"success": False, "message": "Missing chunk_handle or size"}
+        
+        success = self.master.update_chunk_size(chunk_handle, size)
+        return {
+            "success": success,
+            "message": "Size updated successfully" if success else "Update failed"
+        }
+    
     def log_message(self, format, *args):
         """Override para logging personalizado."""
         print(f"[Master API] {format % args}")
@@ -264,25 +317,22 @@ def create_master_api_handler(master: Master):
 
 def run_master_server(master: Master, host: str = "localhost", port: int = 8000):
     """
-    Inicia el servidor HTTP del Master con threading para manejar
+    Crea y retorna el servidor HTTP del Master con threading para manejar
     peticiones concurrentes.
     
     Args:
         master: Instancia del Master
         host: Dirección del servidor
         port: Puerto del servidor
+    
+    Returns:
+        El servidor creado para permitir su cierre desde fuera
     """
     handler = create_master_api_handler(master)
-    # Usar ThreadingTCPServer para manejar peticiones concurrentes
-    server = socketserver.ThreadingTCPServer((host, port), handler)
-    server.allow_reuse_address = True
+    # Usar ReusableThreadingTCPServer para permitir reutilización del puerto
+    server = ReusableThreadingTCPServer((host, port), handler)
     
     print(f"Master API server iniciado en http://{host}:{port}")
     
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nDeteniendo Master API server...")
-        master.stop()
-        server.shutdown()
+    return server
 

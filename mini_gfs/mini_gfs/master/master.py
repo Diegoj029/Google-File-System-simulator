@@ -206,7 +206,9 @@ class Master:
                     }
                     for r in chunk_meta.replicas
                 ],
-                "primary_id": primary_id
+                "primary_id": primary_id,
+                "size": chunk_meta.size,
+                "reference_count": chunk_meta.reference_count
             }
     
     def register_chunkserver(self, chunkserver_id: str, address: str, chunks: List[ChunkHandle], rack_id: str = "default") -> bool:
@@ -218,6 +220,11 @@ class Master:
             # Actualizar rack_id si el chunkserver ya existía
             if chunkserver_id in self.metadata.chunkservers:
                 self.metadata.chunkservers[chunkserver_id].rack_id = rack_id
+            
+            # Mostrar mensaje de registro exitoso
+            if result:
+                print(f"[Master] ChunkServer {chunkserver_id} registrado")
+            
             return result
     
     def handle_heartbeat(self, chunkserver_id: str, chunks: List[ChunkHandle]) -> bool:
@@ -312,4 +319,71 @@ class Master:
         """Lista archivos en un directorio."""
         with self._lock:
             return self.metadata.list_directory(dir_path)
+    
+    def update_chunk_size(self, chunk_handle: ChunkHandle, size: int) -> bool:
+        """Actualiza el tamaño de un chunk en los metadatos."""
+        with self._lock:
+            self.metadata.update_chunk_size(chunk_handle, size)
+            return True
+    
+    def clone_shared_chunk(self, path: str, chunk_index: int, old_chunk_handle: ChunkHandle) -> Optional[ChunkHandle]:
+        """
+        Clona un chunk compartido para copy-on-write.
+        
+        Retorna el nuevo chunk_handle, o None si falla.
+        """
+        import requests
+        
+        with self._lock:
+            available_chunkservers = [
+                cs_id for cs_id, cs_info in self.metadata.chunkservers.items()
+                if cs_info.is_alive
+            ]
+            
+            # Crear nuevo chunk y actualizar metadatos
+            new_chunk_handle = self.metadata.clone_shared_chunk(
+                path, chunk_index, old_chunk_handle, available_chunkservers
+            )
+            
+            if not new_chunk_handle:
+                return None
+            
+            # Obtener información de ambos chunks
+            old_chunk_meta = self.metadata.get_chunk_locations(old_chunk_handle)
+            new_chunk_meta = self.metadata.get_chunk_locations(new_chunk_handle)
+            
+            if not old_chunk_meta or not new_chunk_meta:
+                return None
+        
+        # Coordinar la clonación del contenido en los chunkservers
+        # Cada réplica del nuevo chunk debe clonar desde la réplica correspondiente del chunk original
+        old_replicas = {r.chunkserver_id: r for r in old_chunk_meta.replicas}
+        
+        for new_replica in new_chunk_meta.replicas:
+            # Encontrar réplica correspondiente en el chunk original
+            old_replica = old_replicas.get(new_replica.chunkserver_id)
+            if old_replica:
+                # Clonar desde la misma réplica (más eficiente)
+                src_address = old_replica.address
+            else:
+                # Usar la primera réplica disponible del chunk original
+                src_address = old_chunk_meta.replicas[0].address if old_chunk_meta.replicas else None
+            
+            if src_address:
+                try:
+                    response = requests.post(
+                        f"{new_replica.address}/clone_chunk",
+                        json={
+                            "chunk_handle": new_chunk_handle,
+                            "src_address": src_address,
+                            "src_chunk_handle": old_chunk_handle
+                        },
+                        timeout=60
+                    )
+                    if response.status_code != 200 or not response.json().get("success"):
+                        print(f"Warning: Error clonando contenido de chunk {old_chunk_handle} a {new_chunk_handle} en {new_replica.chunkserver_id}")
+                except Exception as e:
+                    print(f"Warning: Error clonando contenido de chunk: {e}")
+        
+        return new_chunk_handle
 

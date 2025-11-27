@@ -695,13 +695,19 @@ class MasterMetadata:
         """
         chunk_meta = self.chunks.get(chunk_handle)
         if chunk_meta:
-            chunk_meta.size = size
-            
-            # Registrar en WAL
-            self.wal.log_operation(OperationType.UPDATE_CHUNK_SIZE, {
-                "chunk_handle": chunk_handle,
-                "size": size
-            })
+            # Solo actualizar si el nuevo tamaño es mayor (para evitar reducir el tamaño)
+            if size > chunk_meta.size:
+                chunk_meta.size = size
+                
+                # Registrar en WAL
+                self.wal.log_operation(OperationType.UPDATE_CHUNK_SIZE, {
+                    "chunk_handle": chunk_handle,
+                    "size": size
+                })
+        else:
+            # Si el chunk no existe en metadatos, no podemos actualizarlo
+            # Esto no debería pasar en condiciones normales
+            print(f"Warning: Intento de actualizar tamaño de chunk inexistente: {chunk_handle}")
     
     def snapshot_file(self, source_path: str, dest_path: str) -> bool:
         """
@@ -810,6 +816,88 @@ class MasterMetadata:
         self.wal.log_operation(OperationType.DELETE_FILE, {"path": path})
         
         return True
+    
+    def clone_shared_chunk(self, path: str, chunk_index: int, old_chunk_handle: ChunkHandle,
+                          available_chunkservers: List[str]) -> Optional[ChunkHandle]:
+        """
+        Clona un chunk compartido (copy-on-write).
+        
+        Cuando se va a escribir en un chunk que está compartido (reference_count > 1),
+        se debe clonar el chunk para que solo este archivo lo modifique.
+        
+        Args:
+            path: Ruta del archivo que necesita el chunk clonado
+            chunk_index: Índice del chunk en la lista de chunks del archivo
+            old_chunk_handle: Handle del chunk original a clonar
+            available_chunkservers: Lista de IDs de chunkservers disponibles
+        
+        Retorna:
+            Nuevo chunk_handle del chunk clonado, o None si falla
+        """
+        file_meta = self.files.get(path)
+        if not file_meta:
+            return None
+        
+        old_chunk_meta = self.chunks.get(old_chunk_handle)
+        if not old_chunk_meta:
+            return None
+        
+        # Verificar que el chunk_index corresponde al old_chunk_handle
+        if chunk_index >= len(file_meta.chunk_handles) or file_meta.chunk_handles[chunk_index] != old_chunk_handle:
+            return None
+        
+        # Crear nuevo chunk con las mismas réplicas (se clonará el contenido después)
+        new_chunk_handle = str(uuid.uuid4())
+        
+        # Usar las mismas réplicas que el chunk original
+        replica_locations = []
+        for old_replica in old_chunk_meta.replicas:
+            if old_replica.chunkserver_id in available_chunkservers:
+                cs_info = self.chunkservers.get(old_replica.chunkserver_id)
+                if cs_info and cs_info.is_alive:
+                    replica_locations.append(ChunkLocation(
+                        chunkserver_id=old_replica.chunkserver_id,
+                        address=old_replica.address
+                    ))
+        
+        if not replica_locations:
+            return None
+        
+        # Crear metadatos del nuevo chunk
+        new_chunk_meta = ChunkMetadata(
+            handle=new_chunk_handle,
+            version=old_chunk_meta.version,  # Mantener la misma versión
+            replicas=replica_locations,
+            primary_id=old_chunk_meta.primary_id,  # Usar el mismo primary
+            size=old_chunk_meta.size,  # Mantener el mismo tamaño inicial
+            reference_count=1  # Nuevo chunk solo referenciado por este archivo
+        )
+        
+        self.chunks[new_chunk_handle] = new_chunk_meta
+        
+        # Reemplazar el chunk handle en el archivo
+        file_meta.chunk_handles[chunk_index] = new_chunk_handle
+        
+        # Decrementar reference_count del chunk original
+        old_chunk_meta.reference_count -= 1
+        
+        # Actualizar índice inverso para el nuevo chunk
+        for loc in replica_locations:
+            self.chunkserver_chunks[loc.chunkserver_id].add(new_chunk_handle)
+        
+        # Registrar en WAL
+        self.wal.log_operation(OperationType.ALLOCATE_CHUNK, {
+            "path": path,
+            "chunk_index": chunk_index,
+            "chunk_handle": new_chunk_handle,
+            "old_chunk_handle": old_chunk_handle,
+            "replicas": [
+                {"chunkserver_id": r.chunkserver_id, "address": r.address}
+                for r in replica_locations
+            ]
+        })
+        
+        return new_chunk_handle
     
     def list_directory(self, dir_path: str = "/") -> List[str]:
         """

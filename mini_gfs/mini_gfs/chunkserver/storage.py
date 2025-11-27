@@ -276,28 +276,32 @@ class ChunkStorage:
             chunks.append(chunk_handle)
         return chunks
     
-    def clone_chunk(self, chunk_handle: ChunkHandle, src_address: str) -> bool:
+    def clone_chunk(self, chunk_handle: ChunkHandle, src_address: str, src_chunk_handle: Optional[ChunkHandle] = None) -> bool:
         """
         Clona un chunk desde otro ChunkServer.
         
-        En GFS, cuando se necesita re-replicar, el Master instruye
+        En GFS, cuando se necesita re-replicar o hacer copy-on-write, el Master instruye
         a un ChunkServer destino para que clone el chunk desde una fuente.
         
         Args:
-            chunk_handle: Handle del chunk a clonar
+            chunk_handle: Handle del chunk destino (el nuevo chunk a crear)
             src_address: Dirección del ChunkServer fuente (e.g., "http://localhost:8001")
+            src_chunk_handle: Handle del chunk fuente a leer (si None, usa chunk_handle)
         
         Retorna:
             True si se clonó exitosamente, False en caso contrario
         """
         import requests
         
+        # Si no se especifica src_chunk_handle, usar el mismo chunk_handle (re-replicación)
+        read_chunk_handle = src_chunk_handle if src_chunk_handle else chunk_handle
+        
         try:
             # Leer chunk desde el ChunkServer fuente
             response = requests.post(
                 f"{src_address}/read_chunk",
                 json={
-                    "chunk_handle": chunk_handle,
+                    "chunk_handle": read_chunk_handle,
                     "offset": 0,
                     "length": 10 * 1024 * 1024  # Leer hasta 10MB (más que suficiente)
                 },
@@ -315,11 +319,11 @@ class ChunkStorage:
             import base64
             chunk_data = base64.b64decode(result["data"])
             
-            # Escribir chunk localmente
+            # Escribir chunk localmente con el nuevo handle
             self.write_chunk(chunk_handle, 0, chunk_data)
             
             return True
         except Exception as e:
-            print(f"Error clonando chunk {chunk_handle} desde {src_address}: {e}")
+            print(f"Error clonando chunk {read_chunk_handle} desde {src_address} a {chunk_handle}: {e}")
             return False
 
