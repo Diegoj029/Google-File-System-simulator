@@ -58,6 +58,84 @@ async function stopSystem() {
     }
 }
 
+// ========== Gestión de ChunkServers ==========
+
+async function addChunkserver() {
+    if (!confirm('¿Desea agregar un nuevo ChunkServer? El puerto se asignará automáticamente.')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/chunkservers/add`, { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            alert(`✅ ${data.message}\nChunkServer ID: ${data.chunkserver_id}\nPuerto: ${data.port}`);
+            updateSystemStatus();
+            loadNetworkTopology();
+            loadChunkDistribution();
+        } else {
+            alert('❌ Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error agregando ChunkServer: ' + error.message);
+    }
+}
+
+async function removeChunkserver(chunkserverId) {
+    if (!confirm(`¿Está seguro de que desea quitar el ChunkServer ${chunkserverId}?\n\nNota: Podrá restaurarlo más tarde desde la lista.`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/chunkservers/remove`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chunkserver_id: chunkserverId })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            alert(`✅ ${data.message}`);
+            updateSystemStatus();
+            loadNetworkTopology();
+            loadChunkDistribution();
+        } else {
+            alert('❌ Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error quitando ChunkServer: ' + error.message);
+    }
+}
+
+async function restoreChunkserver(chunkserverId) {
+    if (!confirm(`¿Desea restaurar el ChunkServer ${chunkserverId}?`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/chunkservers/restore`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chunkserver_id: chunkserverId })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            alert(`✅ ${data.message}\nChunkServer ID: ${data.chunkserver_id}\nPuerto: ${data.port}`);
+            updateSystemStatus();
+            loadNetworkTopology();
+            loadChunkDistribution();
+        } else {
+            alert('❌ Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error restaurando ChunkServer: ' + error.message);
+    }
+}
+
 async function updateSystemStatus() {
     try {
         const response = await fetch(`${API_BASE}/system/status`);
@@ -69,18 +147,58 @@ async function updateSystemStatus() {
             document.getElementById('master-status').className = `status-indicator ${masterStatus}`;
             document.getElementById('master-pid').textContent = data.master.pid ? `(PID: ${data.master.pid})` : '';
             
-            // ChunkServers
-            for (let i = 1; i <= 3; i++) {
-                const csId = `cs${i}`;
-                const csData = data.chunkservers[csId];
-                if (csData) {
+            // ChunkServers dinámicos
+            const chunkserversList = document.getElementById('chunkservers-list');
+            chunkserversList.innerHTML = '';
+            
+            const chunkservers = data.chunkservers || {};
+            const chunkserverIds = Object.keys(chunkservers).sort();
+            
+            if (chunkserverIds.length === 0) {
+                chunkserversList.innerHTML = '<p style="color: #999;">No hay ChunkServers (activos o detenidos)</p>';
+            } else {
+                chunkserverIds.forEach(csId => {
+                    const csData = chunkservers[csId];
                     const status = csData.running ? 'running' : 'stopped';
-                    document.getElementById(`${csId}-status`).className = `status-indicator ${status}`;
-                    document.getElementById(`${csId}-pid`).textContent = csData.pid ? `(PID: ${csData.pid})` : '';
-                } else {
-                    document.getElementById(`${csId}-status`).className = 'status-indicator stopped';
-                    document.getElementById(`${csId}-pid`).textContent = '';
-                }
+                    const statusText = csData.running ? 'Vivo' : 'Detenido';
+                    const canRestore = csData.can_restore === true;
+                    
+                    const statusItem = document.createElement('div');
+                    statusItem.className = 'status-item';
+                    statusItem.id = `status-${csId}`;
+                    statusItem.style.marginBottom = '8px';
+                    statusItem.style.padding = '8px';
+                    statusItem.style.border = '1px solid #ddd';
+                    statusItem.style.borderRadius = '4px';
+                    statusItem.style.backgroundColor = csData.running ? '#f9f9f9' : '#fff3cd';
+                    
+                    let buttonsHtml = '';
+                    if (csData.running) {
+                        buttonsHtml = `
+                            <button onclick="removeChunkserver('${csId}')" 
+                                    style="margin-left: 10px; background: #e74c3c; color: white; padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                                🗑️ Quitar
+                            </button>
+                        `;
+                    } else if (canRestore) {
+                        buttonsHtml = `
+                            <button onclick="restoreChunkserver('${csId}')" 
+                                    style="margin-left: 10px; background: #2ecc71; color: white; padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                                ▶️ Restaurar
+                            </button>
+                        `;
+                    }
+                    
+                    statusItem.innerHTML = `
+                        <span class="status-label">${csId}:</span>
+                        <span class="status-indicator ${status}">●</span>
+                        <span>${statusText}</span>
+                        <span>${csData.pid ? `(PID: ${csData.pid})` : ''}</span>
+                        <span>${csData.port ? `(Puerto: ${csData.port})` : ''}</span>
+                        ${buttonsHtml}
+                    `;
+                    chunkserversList.appendChild(statusItem);
+                });
             }
         }
     } catch (error) {
@@ -507,7 +625,8 @@ async function loadFiles() {
                 fileItem.innerHTML = `
                     <span>${file}</span>
                     <div>
-                        <button onclick="viewFileInfo('${file}')">👁️ Ver Info</button>
+                        <button onclick="viewFileInfo('${file}')">ℹ️ Ver Info</button>
+                        <button onclick="readFileComplete('${file}')">📖 Leer Archivo</button>
                         <button onclick="deleteFile('${file}')">🗑️ Eliminar</button>
                     </div>
                 `;
@@ -519,13 +638,38 @@ async function loadFiles() {
     }
 }
 
-function showCreateFileDialog() {
-    document.getElementById('file-editor').style.display = 'block';
+// Funciones de diálogos
+function showFileOperationDialog(operation) {
+    // Ocultar todos los diálogos
+    document.querySelectorAll('.operation-dialog').forEach(d => d.style.display = 'none');
+    
+    // Mostrar el diálogo solicitado
+    const dialog = document.getElementById(`dialog-${operation}`);
+    if (dialog) {
+        dialog.style.display = 'block';
+        // Limpiar campos, pero preservar info-path si ya tiene un valor (para viewFileInfo)
+        dialog.querySelectorAll('input, textarea').forEach(input => {
+            if (input.id === 'info-path' && input.value) {
+                // No limpiar info-path si ya tiene un valor
+                return;
+            }
+            if (input.type !== 'number' || input.id === 'write-offset' || input.id === 'read-offset') {
+                input.value = '';
+            }
+        });
+    }
 }
 
-async function createFileFromEditor() {
-    const path = document.getElementById('file-path-input').value;
-    const content = document.getElementById('file-content-input').value;
+function hideFileOperationDialog(operation) {
+    const dialog = document.getElementById(`dialog-${operation}`);
+    if (dialog) {
+        dialog.style.display = 'none';
+    }
+}
+
+// Crear archivo
+async function createFile() {
+    const path = document.getElementById('create-path').value;
     
     if (!path) {
         alert('Por favor ingrese una ruta de archivo');
@@ -542,7 +686,7 @@ async function createFileFromEditor() {
         const data = await response.json();
         if (data.success) {
             alert('Archivo creado correctamente');
-            document.getElementById('file-editor').style.display = 'none';
+            hideFileOperationDialog('create');
             loadFiles();
         } else {
             alert('Error: ' + data.message);
@@ -552,12 +696,133 @@ async function createFileFromEditor() {
     }
 }
 
-async function viewFileInfo(filePath) {
+// Escribir en archivo
+async function writeFile() {
+    const path = document.getElementById('write-path').value;
+    const offset = parseInt(document.getElementById('write-offset').value) || 0;
+    const content = document.getElementById('write-content').value;
+    
+    if (!path) {
+        alert('Por favor ingrese una ruta de archivo');
+        return;
+    }
+    
+    if (!content) {
+        alert('Por favor ingrese contenido a escribir');
+        return;
+    }
+    
     try {
-        const response = await fetch(`${API_BASE}/files/info?path=${encodeURIComponent(filePath)}`);
+        const response = await fetch(`${API_BASE}/files/write`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, offset, content })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            alert(data.message || 'Datos escritos correctamente');
+            hideFileOperationDialog('write');
+            loadFiles();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error escribiendo archivo: ' + error.message);
+    }
+}
+
+// Leer archivo
+async function readFile() {
+    const path = document.getElementById('read-path').value;
+    const offset = parseInt(document.getElementById('read-offset').value) || 0;
+    const length = parseInt(document.getElementById('read-length').value) || 100;
+    
+    if (!path) {
+        alert('Por favor ingrese una ruta de archivo');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/files/read`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, offset, length })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            const resultDiv = document.getElementById('read-result');
+            const contentDiv = document.getElementById('read-content');
+            
+            if (data.is_text) {
+                contentDiv.textContent = data.content;
+            } else {
+                contentDiv.textContent = `Datos (hex): ${data.content}\n\nBytes leídos: ${data.bytes_read}`;
+            }
+            
+            resultDiv.style.display = 'block';
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error leyendo archivo: ' + error.message);
+    }
+}
+
+// Append a archivo
+async function appendFile() {
+    const path = document.getElementById('append-path').value;
+    const content = document.getElementById('append-content').value;
+    
+    if (!path) {
+        alert('Por favor ingrese una ruta de archivo');
+        return;
+    }
+    
+    if (!content) {
+        alert('Por favor ingrese contenido a añadir');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/files/append`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, content })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            alert(data.message || 'Datos añadidos correctamente');
+            hideFileOperationDialog('append');
+            loadFiles();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error añadiendo datos: ' + error.message);
+    }
+}
+
+// Obtener información de archivo (ls)
+async function getFileInfo(filePath = null) {
+    // Si se proporciona un path como parámetro, usarlo; si no, leer del campo del formulario
+    const path = filePath || document.getElementById('info-path').value;
+    
+    if (!path) {
+        alert('Por favor ingrese una ruta de archivo');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/files/info?path=${encodeURIComponent(path)}`);
         const data = await response.json();
         
         if (data.success) {
+            const resultDiv = document.getElementById('info-result');
+            const contentDiv = document.getElementById('info-content');
+            
             let info = `Archivo: ${data.path}\n\n`;
             info += `Chunks: ${data.chunk_handles.length}\n\n`;
             info += 'Información de Chunks:\n';
@@ -565,9 +830,12 @@ async function viewFileInfo(filePath) {
                 info += `\nChunk ${i + 1}:\n`;
                 info += `  Handle: ${chunk.chunk_handle}\n`;
                 info += `  Réplicas: ${chunk.replicas.map(r => r.chunkserver_id).join(', ')}\n`;
+                info += `  Primary: ${chunk.primary_id || 'N/A'}\n`;
                 info += `  Tamaño: ${chunk.size} bytes\n`;
             });
-            alert(info);
+            
+            contentDiv.textContent = info;
+            resultDiv.style.display = 'block';
         } else {
             alert('Error: ' + data.message);
         }
@@ -576,7 +844,77 @@ async function viewFileInfo(filePath) {
     }
 }
 
+// Crear snapshot
+async function snapshotFile() {
+    const sourcePath = document.getElementById('snapshot-source').value;
+    const destPath = document.getElementById('snapshot-dest').value;
+    
+    if (!sourcePath || !destPath) {
+        alert('Por favor ingrese ambas rutas (fuente y destino)');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/files/snapshot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_path: sourcePath, dest_path: destPath })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            alert(data.message || 'Snapshot creado correctamente');
+            hideFileOperationDialog('snapshot');
+            loadFiles();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error creando snapshot: ' + error.message);
+    }
+}
+
+// Renombrar archivo
+async function renameFile() {
+    const oldPath = document.getElementById('rename-old').value;
+    const newPath = document.getElementById('rename-new').value;
+    
+    if (!oldPath || !newPath) {
+        alert('Por favor ingrese ambas rutas (antigua y nueva)');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/files/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ old_path: oldPath, new_path: newPath })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            alert(data.message || 'Archivo renombrado correctamente');
+            hideFileOperationDialog('rename');
+            loadFiles();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error renombrando archivo: ' + error.message);
+    }
+}
+
+// Eliminar archivo (versión mejorada)
 async function deleteFile(filePath) {
+    // Si se llama desde el botón del diálogo
+    if (!filePath) {
+        filePath = document.getElementById('delete-path').value;
+        if (!filePath) {
+            alert('Por favor ingrese una ruta de archivo');
+            return;
+        }
+    }
+    
     if (!confirm(`¿Está seguro de que desea eliminar ${filePath}?`)) {
         return;
     }
@@ -591,6 +929,9 @@ async function deleteFile(filePath) {
         const data = await response.json();
         if (data.success) {
             alert('Archivo eliminado');
+            if (document.getElementById('delete-path')) {
+                hideFileOperationDialog('delete');
+            }
             loadFiles();
             loadChunkDistribution();
         } else {
@@ -598,6 +939,49 @@ async function deleteFile(filePath) {
         }
     } catch (error) {
         alert('Error eliminando archivo: ' + error.message);
+    }
+}
+
+// Función auxiliar para ver info desde la lista
+async function viewFileInfo(filePath) {
+    // Mostrar el diálogo y establecer el valor del campo
+    showFileOperationDialog('info');
+    document.getElementById('info-path').value = filePath;
+    // Llamar a getFileInfo pasando el path directamente como parámetro
+    getFileInfo(filePath);
+}
+
+// Función para leer archivo completo desde la lista
+async function readFileComplete(filePath) {
+    try {
+        // Leer el archivo completo (sin especificar length, el servidor leerá todo)
+        const response = await fetch(`${API_BASE}/files/read`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: filePath, offset: 0 })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            // Mostrar el resultado en un diálogo
+            const resultDiv = document.getElementById('read-result');
+            const contentDiv = document.getElementById('read-content');
+            
+            if (data.is_text) {
+                contentDiv.textContent = data.content;
+            } else {
+                contentDiv.textContent = `Datos (hex): ${data.content}\n\nBytes leídos: ${data.bytes_read}`;
+            }
+            
+            // Mostrar el diálogo de lectura
+            document.getElementById('read-path').value = filePath;
+            showFileOperationDialog('read');
+            resultDiv.style.display = 'block';
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (error) {
+        alert('Error leyendo archivo: ' + error.message);
     }
 }
 

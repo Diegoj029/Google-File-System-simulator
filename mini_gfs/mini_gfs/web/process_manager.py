@@ -35,6 +35,16 @@ class ProcessManager:
         self.master_process: Optional[subprocess.Popen] = None
         self.chunkserver_processes: Dict[str, subprocess.Popen] = {}
         
+        # Mapeo de ChunkServer ID a puerto
+        self.chunkserver_port_map: Dict[str, int] = {}
+        
+        # Información de ChunkServers quitados (para poder restaurarlos)
+        # Guarda: {chunkserver_id: {"port": int, "data_dir": str}}
+        self.removed_chunkservers: Dict[str, dict] = {}
+        
+        # Puerto base para ChunkServers (se incrementa automáticamente)
+        self.next_chunkserver_port = max(self.chunkserver_ports) + 1 if self.chunkserver_ports else 8001
+        
         # Obtener ruta base del proyecto
         self.base_path = Path(__file__).parent.parent.parent.parent
     
@@ -155,6 +165,7 @@ class ProcessManager:
             )
             
             self.chunkserver_processes[chunkserver_id] = proc
+            self.chunkserver_port_map[chunkserver_id] = port
             
             # Esperar y verificar que el proceso sigue ejecutándose
             time.sleep(3)  # Aumentar tiempo de espera
@@ -168,18 +179,30 @@ class ProcessManager:
                     print(f"Stderr: {stderr_output}")
                 except:
                     pass
+                # Limpiar el mapeo si falló
+                if chunkserver_id in self.chunkserver_port_map:
+                    del self.chunkserver_port_map[chunkserver_id]
                 return False
             
             # Verificar que el ChunkServer esté respondiendo
             chunkserver_address = f"http://localhost:{port}"
             if self._wait_for_chunkserver(chunkserver_address, timeout=10):
                 print(f"ChunkServer {chunkserver_id} iniciado correctamente (PID: {proc.pid}, Puerto: {port})")
+                # Actualizar el siguiente puerto disponible
+                if port >= self.next_chunkserver_port:
+                    self.next_chunkserver_port = port + 1
                 return True
             else:
                 print(f"Advertencia: ChunkServer {chunkserver_id} iniciado pero no responde en {chunkserver_address}")
                 # Aún así retornar True si el proceso está vivo
                 if proc.poll() is None:
+                    # Actualizar el siguiente puerto disponible
+                    if port >= self.next_chunkserver_port:
+                        self.next_chunkserver_port = port + 1
                     return True
+                # Limpiar el mapeo si falló
+                if chunkserver_id in self.chunkserver_port_map:
+                    del self.chunkserver_port_map[chunkserver_id]
                 return False
             
         except Exception as e:
@@ -251,6 +274,11 @@ class ProcessManager:
                 print(f"❌ Error iniciando {chunkserver_id}")
             else:
                 print(f"✅ {chunkserver_id} iniciado correctamente")
+                # Registrar el puerto usado
+                self.chunkserver_port_map[chunkserver_id] = port
+                # Actualizar el siguiente puerto disponible
+                if port >= self.next_chunkserver_port:
+                    self.next_chunkserver_port = port + 1
         
         if success:
             print("✅ Sistema GFS iniciado correctamente (Master + 3 ChunkServers)")
@@ -278,10 +306,26 @@ class ProcessManager:
             finally:
                 self.master_process = None
     
-    def stop_chunkserver(self, chunkserver_id: str):
-        """Detiene un ChunkServer específico."""
+    def stop_chunkserver(self, chunkserver_id: str, save_info: bool = False):
+        """
+        Detiene un ChunkServer específico.
+        
+        Args:
+            chunkserver_id: ID del ChunkServer a detener
+            save_info: Si es True, guarda la información del ChunkServer para poder restaurarlo después
+        """
         if chunkserver_id in self.chunkserver_processes:
             proc = self.chunkserver_processes[chunkserver_id]
+            
+            # Guardar información antes de eliminar si se solicita
+            if save_info:
+                port = self.chunkserver_port_map.get(chunkserver_id)
+                data_dir = str(self.base_path / "data" / chunkserver_id)
+                self.removed_chunkservers[chunkserver_id] = {
+                    "port": port,
+                    "data_dir": data_dir
+                }
+            
             try:
                 proc.terminate()
                 try:
@@ -293,7 +337,10 @@ class ProcessManager:
             except Exception as e:
                 print(f"Error deteniendo ChunkServer {chunkserver_id}: {e}")
             finally:
-                del self.chunkserver_processes[chunkserver_id]
+                if chunkserver_id in self.chunkserver_processes:
+                    del self.chunkserver_processes[chunkserver_id]
+                if chunkserver_id in self.chunkserver_port_map:
+                    del self.chunkserver_port_map[chunkserver_id]
     
     def stop_all(self):
         """Detiene todos los procesos (Master + ChunkServers)."""
@@ -579,4 +626,152 @@ class ProcessManager:
             time.sleep(0.5)
         
         return False
+    
+    def add_chunkserver(self) -> dict:
+        """
+        Agrega un nuevo ChunkServer dinámicamente con puerto automático e incremental.
+        
+        Returns:
+            Diccionario con el resultado de la operación
+        """
+        # Encontrar el siguiente puerto disponible
+        port = self.next_chunkserver_port
+        while self._is_port_in_use(port):
+            port += 1
+        
+        # Generar ID único para el ChunkServer
+        chunkserver_id = f"cs{len(self.chunkserver_processes) + 1}"
+        # Asegurarse de que el ID sea único
+        counter = 1
+        while chunkserver_id in self.chunkserver_processes:
+            chunkserver_id = f"cs{len(self.chunkserver_processes) + counter}"
+            counter += 1
+        
+        # Crear directorio de datos
+        data_dir = str(self.base_path / "data" / chunkserver_id)
+        
+        print(f"Agregando ChunkServer {chunkserver_id} en puerto {port}...")
+        
+        if self.start_chunkserver(port, chunkserver_id, data_dir):
+            return {
+                "success": True,
+                "chunkserver_id": chunkserver_id,
+                "port": port,
+                "message": f"ChunkServer {chunkserver_id} agregado correctamente en puerto {port}"
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Error agregando ChunkServer {chunkserver_id}"
+            }
+    
+    def remove_chunkserver(self, chunkserver_id: str) -> dict:
+        """
+        Quita un ChunkServer del sistema (pero guarda su información para poder restaurarlo).
+        
+        Args:
+            chunkserver_id: ID del ChunkServer a quitar
+        
+        Returns:
+            Diccionario con el resultado de la operación
+        """
+        if chunkserver_id not in self.chunkserver_processes:
+            return {
+                "success": False,
+                "message": f"ChunkServer {chunkserver_id} no está ejecutándose"
+            }
+        
+        print(f"Quitando ChunkServer {chunkserver_id}...")
+        # Guardar información antes de detener
+        self.stop_chunkserver(chunkserver_id, save_info=True)
+        
+        return {
+            "success": True,
+            "chunkserver_id": chunkserver_id,
+            "message": f"ChunkServer {chunkserver_id} quitado correctamente (puede ser restaurado)"
+        }
+    
+    def restore_chunkserver(self, chunkserver_id: str) -> dict:
+        """
+        Restaura/reinicia un ChunkServer que fue quitado previamente.
+        
+        Args:
+            chunkserver_id: ID del ChunkServer a restaurar
+        
+        Returns:
+            Diccionario con el resultado de la operación
+        """
+        if chunkserver_id not in self.removed_chunkservers:
+            return {
+                "success": False,
+                "message": f"ChunkServer {chunkserver_id} no está en la lista de ChunkServers quitados"
+            }
+        
+        if chunkserver_id in self.chunkserver_processes:
+            return {
+                "success": False,
+                "message": f"ChunkServer {chunkserver_id} ya está ejecutándose"
+            }
+        
+        # Obtener información guardada
+        info = self.removed_chunkservers[chunkserver_id]
+        port = info["port"]
+        data_dir = info["data_dir"]
+        
+        # Verificar que el puerto no esté en uso
+        if self._is_port_in_use(port):
+            return {
+                "success": False,
+                "message": f"El puerto {port} está en uso. No se puede restaurar {chunkserver_id}"
+            }
+        
+        print(f"Restaurando ChunkServer {chunkserver_id} en puerto {port}...")
+        
+        if self.start_chunkserver(port, chunkserver_id, data_dir):
+            # Eliminar de la lista de quitados
+            del self.removed_chunkservers[chunkserver_id]
+            return {
+                "success": True,
+                "chunkserver_id": chunkserver_id,
+                "port": port,
+                "message": f"ChunkServer {chunkserver_id} restaurado correctamente en puerto {port}"
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Error restaurando ChunkServer {chunkserver_id}"
+            }
+    
+    def get_chunkservers_info(self) -> dict:
+        """
+        Obtiene información de todos los ChunkServers activos y quitados.
+        
+        Returns:
+            Diccionario con información de cada ChunkServer (activos y quitados)
+        """
+        chunkservers_info = {}
+        
+        # ChunkServers activos
+        for chunkserver_id, proc in self.chunkserver_processes.items():
+            port = self.chunkserver_port_map.get(chunkserver_id, None)
+            chunkservers_info[chunkserver_id] = {
+                "id": chunkserver_id,
+                "port": port,
+                "running": proc.poll() is None,
+                "pid": proc.pid if proc.poll() is None else None,
+                "status": "running"
+            }
+        
+        # ChunkServers quitados (que pueden ser restaurados)
+        for chunkserver_id, info in self.removed_chunkservers.items():
+            chunkservers_info[chunkserver_id] = {
+                "id": chunkserver_id,
+                "port": info["port"],
+                "running": False,
+                "pid": None,
+                "status": "stopped",
+                "can_restore": True
+            }
+        
+        return chunkservers_info
 

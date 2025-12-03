@@ -425,6 +425,83 @@ class ClientAPI:
         self._record_operation('read', start_time, time.time(), False, 0)
         return None
     
+    def read_full_file(self, path: str) -> Optional[bytes]:
+        """
+        Lee un archivo completo desde el principio hasta el final.
+        
+        Lee todos los chunks del archivo y los concatena.
+        """
+        start_time = time.time()
+        
+        # Obtener información del archivo
+        file_info = self.get_file_info(path)
+        if not file_info:
+            self._record_operation('read', start_time, time.time(), False, 0)
+            return None
+        
+        chunk_handles = file_info.get("chunk_handles", [])
+        if not chunk_handles:
+            # Archivo vacío
+            self._record_operation('read', start_time, time.time(), True, 0)
+            return b''
+        
+        # Leer cada chunk y concatenar
+        all_data = b''
+        
+        for i, chunk_handle in enumerate(chunk_handles):
+            if not chunk_handle:
+                continue
+            
+            # Obtener ubicaciones del chunk (incluye el tamaño real)
+            locations = self.get_chunk_locations(chunk_handle)
+            if not locations:
+                print(f"Warning: No se encontraron ubicaciones para chunk {chunk_handle}, saltando")
+                continue
+            
+            replicas = locations.get("replicas", [])
+            if not replicas:
+                print(f"Warning: No hay réplicas disponibles para chunk {chunk_handle}, saltando")
+                continue
+            
+            # Obtener el tamaño real del chunk
+            chunk_size = locations.get("size", self.config.chunk_size)
+            if chunk_size == 0:
+                # Chunk vacío, continuar
+                continue
+            
+            # Leer el chunk completo usando el tamaño real
+            chunk_data = None
+            for replica in replicas:
+                try:
+                    response = requests.post(
+                        f"{replica['address']}/read_chunk",
+                        json={
+                            "chunk_handle": chunk_handle,
+                            "offset": 0,
+                            "length": chunk_size
+                        },
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get("success"):
+                            data_b64 = result.get("data")
+                            chunk_data = base64.b64decode(data_b64)
+                            break
+                except Exception as e:
+                    print(f"Warning: Error leyendo chunk {chunk_handle} de réplica {replica['chunkserver_id']}: {e}")
+                    continue
+            
+            if chunk_data:
+                all_data += chunk_data
+            else:
+                print(f"Warning: No se pudo leer chunk {chunk_handle}")
+        
+        end_time = time.time()
+        self._record_operation('read', start_time, end_time, True, len(all_data))
+        return all_data
+    
     def append(self, path: str, data: bytes) -> bool:
         """
         Añade un record al final de un archivo.

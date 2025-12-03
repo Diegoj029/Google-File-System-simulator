@@ -28,21 +28,14 @@
                     <span id="master-status" class="status-indicator">●</span>
                     <span id="master-pid"></span>
                 </div>
-                <div class="status-item">
-                    <span class="status-label">ChunkServer 1:</span>
-                    <span id="cs1-status" class="status-indicator">●</span>
-                    <span id="cs1-pid"></span>
+                <div id="chunkservers-list" class="chunkservers-list">
+                    <!-- Los ChunkServers se mostrarán dinámicamente aquí -->
                 </div>
-                <div class="status-item">
-                    <span class="status-label">ChunkServer 2:</span>
-                    <span id="cs2-status" class="status-indicator">●</span>
-                    <span id="cs2-pid"></span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">ChunkServer 3:</span>
-                    <span id="cs3-status" class="status-indicator">●</span>
-                    <span id="cs3-pid"></span>
-                </div>
+            </div>
+            <div class="chunkserver-controls" style="margin-top: 15px;">
+                <button onclick="addChunkserver()" style="background: #2ecc71; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;">
+                    ➕ Agregar ChunkServer
+                </button>
             </div>
         </section>
 
@@ -117,21 +110,135 @@
             </div>
         </section>
 
-        <!-- Panel de Archivos -->
-        <section class="panel files">
-            <h2>📁 Archivos</h2>
-            <div class="file-controls">
-                <button onclick="loadFiles()">🔄 Actualizar Lista</button>
-                <button onclick="showCreateFileDialog()">➕ Crear Archivo</button>
+        <!-- Panel de Archivos - Layout de dos columnas -->
+        <div class="files-container">
+            <!-- Columna izquierda: Operaciones -->
+            <section class="panel files files-operations">
+                <h2>📁 Operaciones de Archivos</h2>
+                <div class="file-controls">
+                    <button onclick="loadFiles()">🔄 Actualizar Lista</button>
+                    <button onclick="showFileOperationDialog('create')">➕ Crear Archivo</button>
+                </div>
+                
+                <!-- Diálogos de Operaciones -->
+            <div id="file-operations" class="file-operations">
+                <!-- Crear Archivo -->
+                <div id="dialog-create" class="operation-dialog" style="display: none;">
+                    <h3>Crear Archivo</h3>
+                    <input type="text" id="create-path" placeholder="Ruta del archivo (ej: /mi_archivo.txt)">
+                    <div class="dialog-buttons">
+                        <button onclick="createFile()">Crear</button>
+                        <button onclick="hideFileOperationDialog('create')">Cancelar</button>
+                    </div>
+                </div>
+                
+                <!-- Escribir en Archivo -->
+                <div id="dialog-write" class="operation-dialog" style="display: none;">
+                    <h3>Escribir en Archivo</h3>
+                    <input type="text" id="write-path" placeholder="Ruta del archivo">
+                    <input type="number" id="write-offset" placeholder="Offset (bytes)" value="0">
+                    <textarea id="write-content" placeholder="Contenido a escribir..."></textarea>
+                    <div class="dialog-buttons">
+                        <button onclick="writeFile()">Escribir</button>
+                        <button onclick="hideFileOperationDialog('write')">Cancelar</button>
+                    </div>
+                </div>
+                
+                <!-- Leer Archivo -->
+                <div id="dialog-read" class="operation-dialog" style="display: none;">
+                    <h3>Leer Archivo</h3>
+                    <input type="text" id="read-path" placeholder="Ruta del archivo">
+                    <input type="number" id="read-offset" placeholder="Offset (bytes)" value="0">
+                    <input type="number" id="read-length" placeholder="Longitud (bytes)" value="100">
+                    <div class="dialog-buttons">
+                        <button onclick="readFile()">Leer</button>
+                        <button onclick="hideFileOperationDialog('read')">Cancelar</button>
+                    </div>
+                    <div id="read-result" class="read-result" style="display: none;">
+                        <h4>Resultado:</h4>
+                        <pre id="read-content"></pre>
+                    </div>
+                </div>
+                
+                <!-- Append a Archivo -->
+                <div id="dialog-append" class="operation-dialog" style="display: none;">
+                    <h3>Añadir al Final del Archivo</h3>
+                    <input type="text" id="append-path" placeholder="Ruta del archivo">
+                    <textarea id="append-content" placeholder="Contenido a añadir..."></textarea>
+                    <div class="dialog-buttons">
+                        <button onclick="appendFile()">Añadir</button>
+                        <button onclick="hideFileOperationDialog('append')">Cancelar</button>
+                    </div>
+                </div>
+                
+                <!-- Información de Archivo (ls) -->
+                <div id="dialog-info" class="operation-dialog" style="display: none;">
+                    <h3>Información de Archivo</h3>
+                    <input type="text" id="info-path" placeholder="Ruta del archivo">
+                    <div class="dialog-buttons">
+                        <button onclick="getFileInfo()">Obtener Info</button>
+                        <button onclick="hideFileOperationDialog('info')">Cancelar</button>
+                    </div>
+                    <div id="info-result" class="info-result" style="display: none;">
+                        <h4>Información:</h4>
+                        <pre id="info-content"></pre>
+                    </div>
+                </div>
+                
+                <!-- Snapshot -->
+                <div id="dialog-snapshot" class="operation-dialog" style="display: none;">
+                    <h3>Crear Snapshot</h3>
+                    <input type="text" id="snapshot-source" placeholder="Ruta del archivo fuente">
+                    <input type="text" id="snapshot-dest" placeholder="Ruta del snapshot destino">
+                    <div class="dialog-buttons">
+                        <button onclick="snapshotFile()">Crear Snapshot</button>
+                        <button onclick="hideFileOperationDialog('snapshot')">Cancelar</button>
+                    </div>
+                </div>
+                
+                <!-- Renombrar Archivo -->
+                <div id="dialog-rename" class="operation-dialog" style="display: none;">
+                    <h3>Renombrar Archivo</h3>
+                    <input type="text" id="rename-old" placeholder="Ruta antigua">
+                    <input type="text" id="rename-new" placeholder="Ruta nueva">
+                    <div class="dialog-buttons">
+                        <button onclick="renameFile()">Renombrar</button>
+                        <button onclick="hideFileOperationDialog('rename')">Cancelar</button>
+                    </div>
+                </div>
+                
+                <!-- Eliminar Archivo -->
+                <div id="dialog-delete" class="operation-dialog" style="display: none;">
+                    <h3>Eliminar Archivo</h3>
+                    <input type="text" id="delete-path" placeholder="Ruta del archivo a eliminar">
+                    <div class="dialog-buttons">
+                        <button onclick="deleteFile()" class="danger">Eliminar</button>
+                        <button onclick="hideFileOperationDialog('delete')">Cancelar</button>
+                    </div>
+                </div>
             </div>
-            <div id="files-list" class="files-list"></div>
-            <div id="file-editor" class="file-editor" style="display: none;">
-                <h3>Editor de Archivo</h3>
-                <input type="text" id="file-path-input" placeholder="Ruta del archivo (ej: /mi_archivo.txt)">
-                <textarea id="file-content-input" placeholder="Contenido del archivo..."></textarea>
-                <button onclick="createFileFromEditor()">💾 Guardar Archivo</button>
-            </div>
-        </section>
+            
+                <!-- Botones de Operaciones Rápidas -->
+                <div class="file-quick-actions">
+                    <h3>Operaciones Rápidas</h3>
+                    <div class="quick-actions-grid">
+                        <button onclick="showFileOperationDialog('write')">✏️ Escribir</button>
+                        <button onclick="showFileOperationDialog('read')">👁️ Leer</button>
+                        <button onclick="showFileOperationDialog('append')">➕ Añadir</button>
+                        <button onclick="showFileOperationDialog('info')">ℹ️ Información</button>
+                        <button onclick="showFileOperationDialog('snapshot')">📸 Snapshot</button>
+                        <button onclick="showFileOperationDialog('rename')">✏️ Renombrar</button>
+                        <button onclick="showFileOperationDialog('delete')">🗑️ Eliminar</button>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Columna derecha: Lista de Archivos -->
+            <section class="panel files files-list-panel">
+                <h2>📋 Lista de Archivos</h2>
+                <div id="files-list" class="files-list"></div>
+            </section>
+        </div>
 
         <!-- Panel de Configuración -->
         <section class="panel config">
