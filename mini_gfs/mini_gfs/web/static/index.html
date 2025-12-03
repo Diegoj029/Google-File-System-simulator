@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini-GFS - Interfaz Web</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1>🖥️ Mini-GFS - Interfaz Web</h1>
+        <p>Sistema de Archivos Distribuido - Simulador Educativo</p>
+    </header>
+
+    <div class="container">
+        <!-- Panel de Control del Sistema -->
+        <section class="panel system-control">
+            <h2>⚙️ Control del Sistema</h2>
+            <div class="control-buttons">
+                <button id="btn-start" onclick="startSystem()">▶️ Iniciar Sistema</button>
+                <button id="btn-stop" onclick="stopSystem()">⏹️ Detener Sistema</button>
+                <button onclick="updateSystemStatus()">🔄 Actualizar Estado</button>
+            </div>
+            <div class="status-display">
+                <div class="status-item">
+                    <span class="status-label">Master:</span>
+                    <span id="master-status" class="status-indicator">●</span>
+                    <span id="master-pid"></span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">ChunkServer 1:</span>
+                    <span id="cs1-status" class="status-indicator">●</span>
+                    <span id="cs1-pid"></span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">ChunkServer 2:</span>
+                    <span id="cs2-status" class="status-indicator">●</span>
+                    <span id="cs2-pid"></span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">ChunkServer 3:</span>
+                    <span id="cs3-status" class="status-indicator">●</span>
+                    <span id="cs3-pid"></span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Panel de Visualización de Red -->
+        <section class="panel network-topology">
+            <h2>🌐 Topología del Sistema GFS</h2>
+            <div class="info-box">
+                <p><strong>¿Qué es la topología de red?</strong></p>
+                <p>La topología muestra cómo están conectados los componentes del sistema GFS. El Master es el coordinador central que gestiona todos los metadatos, mientras que los ChunkServers almacenan los datos (chunks) en disco. Las conexiones representan la comunicación entre componentes (heartbeats y registro).</p>
+            </div>
+            <div class="topology-controls">
+                <button onclick="loadNetworkTopology()">🔄 Actualizar Topología</button>
+            </div>
+            <div id="topology-container" class="topology-visualization">
+                <svg id="topology-svg" width="100%" height="500"></svg>
+            </div>
+            <div class="legend">
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #3498db;"></span>
+                    <span>Master (Coordinador Central)</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #2ecc71;"></span>
+                    <span>ChunkServer Vivo</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #e74c3c;"></span>
+                    <span>ChunkServer Muerto</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-line" style="background: gray;"></span>
+                    <span>Conexión (Heartbeat/Registro)</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Panel de Distribución de Chunks -->
+        <section class="panel chunk-distribution">
+            <h2>📦 Distribución de Chunks en el Sistema</h2>
+            <div class="info-box">
+                <p><strong>¿Qué es un chunk?</strong></p>
+                <p>Un chunk es una porción de un archivo (típicamente 1MB en este simulador). Cada chunk se replica en múltiples ChunkServers para tolerancia a fallos. El replication_factor determina cuántas copias de cada chunk existen. Si un ChunkServer falla, el sistema re-replica automáticamente.</p>
+            </div>
+            <div class="distribution-controls">
+                <div class="view-selector">
+                    <label>
+                        <input type="radio" name="view-type" value="general" checked onchange="updateChunkDistributionView()">
+                        Vista General
+                    </label>
+                    <label>
+                        <input type="radio" name="view-type" value="file" onchange="updateChunkDistributionView()">
+                        Vista por Archivo
+                    </label>
+                </div>
+                <select id="file-selector" style="display: none;" onchange="loadChunkDistribution()">
+                    <option value="">Seleccionar archivo...</option>
+                </select>
+                <button onclick="loadChunkDistribution()">🔄 Actualizar Distribución</button>
+            </div>
+            <div id="distribution-container">
+                <div id="distribution-general" class="distribution-view">
+                    <h3>Vista General</h3>
+                    <div id="distribution-chart" class="chart-container"></div>
+                    <div id="distribution-table-container" class="table-container"></div>
+                    <div id="distribution-network" class="network-graph"></div>
+                </div>
+                <div id="distribution-file" class="distribution-view" style="display: none;">
+                    <h3>Vista por Archivo</h3>
+                    <div id="file-chunks-diagram" class="chunks-diagram"></div>
+                    <div id="file-chunks-table" class="table-container"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Panel de Archivos -->
+        <section class="panel files">
+            <h2>📁 Archivos</h2>
+            <div class="file-controls">
+                <button onclick="loadFiles()">🔄 Actualizar Lista</button>
+                <button onclick="showCreateFileDialog()">➕ Crear Archivo</button>
+            </div>
+            <div id="files-list" class="files-list"></div>
+            <div id="file-editor" class="file-editor" style="display: none;">
+                <h3>Editor de Archivo</h3>
+                <input type="text" id="file-path-input" placeholder="Ruta del archivo (ej: /mi_archivo.txt)">
+                <textarea id="file-content-input" placeholder="Contenido del archivo..."></textarea>
+                <button onclick="createFileFromEditor()">💾 Guardar Archivo</button>
+            </div>
+        </section>
+
+        <!-- Panel de Configuración -->
+        <section class="panel config">
+            <h2>⚙️ Configuración</h2>
+            <div id="config-form" class="config-form">
+                <div class="config-item">
+                    <label>Replication Factor:</label>
+                    <input type="number" id="config-replication" min="1" max="5" value="3">
+                    <span class="config-help">Número de réplicas de cada chunk (1-5)</span>
+                </div>
+                <div class="config-item">
+                    <label>Chunk Size (MB):</label>
+                    <input type="number" id="config-chunk-size" min="1" value="1">
+                    <span class="config-help">Tamaño de cada chunk en megabytes</span>
+                </div>
+                <div class="config-item">
+                    <label>Heartbeat Timeout (seg):</label>
+                    <input type="number" id="config-heartbeat" min="5" value="30">
+                    <span class="config-help">Tiempo antes de considerar un ChunkServer muerto</span>
+                </div>
+                <div class="config-item">
+                    <label>Lease Duration (seg):</label>
+                    <input type="number" id="config-lease" min="10" value="60">
+                    <span class="config-help">Duración del lease para escrituras</span>
+                </div>
+                <button onclick="updateConfig()">💾 Aplicar Configuración</button>
+            </div>
+        </section>
+
+        <!-- Panel de Métricas -->
+        <section class="panel metrics">
+            <h2>📊 Métricas en Tiempo Real</h2>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">ChunkServers Vivos</div>
+                    <div class="metric-value" id="metric-alive">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">ChunkServers Muertos</div>
+                    <div class="metric-value" id="metric-dead">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total de Chunks</div>
+                    <div class="metric-value" id="metric-chunks">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Chunks Sub-replicados</div>
+                    <div class="metric-value" id="metric-under-replicated">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total de Archivos</div>
+                    <div class="metric-value" id="metric-files">-</div>
+                </div>
+            </div>
+            <button onclick="loadMetrics()">🔄 Actualizar Métricas</button>
+        </section>
+
+        <!-- Panel de Gráficas -->
+        <section class="panel graphs">
+            <h2>📈 Gráficas</h2>
+            <div class="graph-controls">
+                <button onclick="generatePerformanceGraph()">📊 Generar Gráfica de Rendimiento</button>
+                <button onclick="generateClusterView()">🏢 Generar Vista del Cluster</button>
+                <button onclick="generateNetworkTopologyImage()">🌐 Generar Topología de Red</button>
+                <button onclick="generateChunkDistributionImage()">📦 Generar Distribución de Chunks</button>
+            </div>
+            <div id="graph-display" class="graph-display"></div>
+        </section>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
+

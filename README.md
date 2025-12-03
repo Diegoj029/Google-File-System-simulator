@@ -99,6 +99,31 @@ mini_gfs/
   The Google File System.pdf  # Paper completo de GFS (SOSP 2003)
 ```
 
+## Interfaz Web Gráfica
+
+Para una experiencia más interactiva y didáctica, puedes usar la interfaz web gráfica que permite:
+
+- Gestionar el sistema completo (Master + 3 ChunkServers) desde el navegador
+- **Visualizar la topología de red del sistema de forma clara y educativa**
+- **Ver cómo se distribuyen los chunks entre ChunkServers con visualizaciones interactivas**
+- Crear, leer y explorar archivos visualmente
+- Modificar parámetros de configuración en tiempo real
+- Ver métricas y gráficas de rendimiento
+
+La interfaz está diseñada especialmente para fines educativos, con visualizaciones claras y explicaciones que ayudan a entender cómo funciona GFS.
+
+**Ver [WEB_INTERFACE.md](WEB_INTERFACE.md) para más detalles.**
+
+Para ejecutar la interfaz web:
+
+```bash
+python3 mini_gfs/run_web.py
+```
+
+Luego abre tu navegador en `http://localhost:8080`
+
+---
+
 ## Uso
 
 ### 1. Iniciar el Master
