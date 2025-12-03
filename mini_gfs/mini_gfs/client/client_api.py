@@ -6,6 +6,7 @@ y los ChunkServers (para datos).
 """
 import requests
 import base64
+import time
 from typing import Optional, List, Dict
 
 from ..common.types import ChunkHandle, ChunkLocation
@@ -130,6 +131,35 @@ class ClientAPI:
         
         return (chunk_handles[chunk_index], offset_in_chunk)
     
+    def _record_operation(self, operation_type: str, start_time: float, end_time: float,
+                         success: bool, bytes_transferred: int):
+        """
+        Registra una operación en el Master para métricas.
+        
+        Args:
+            operation_type: Tipo de operación ('read', 'write', 'append')
+            start_time: Timestamp de inicio
+            end_time: Timestamp de fin
+            success: Si la operación fue exitosa
+            bytes_transferred: Bytes transferidos
+        """
+        try:
+            requests.post(
+                f"{self.master_address}/record_operation",
+                json={
+                    "operation_type": operation_type,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "success": success,
+                    "bytes_transferred": bytes_transferred,
+                    "chunkserver_id": None  # El cliente no tiene chunkserver_id
+                },
+                timeout=1  # Timeout corto para no bloquear
+            )
+        except Exception:
+            # Ignorar errores silenciosamente para no afectar el rendimiento
+            pass
+    
     def write(self, path: str, offset: int, data: bytes) -> bool:
         """
         Escribe datos en un archivo.
@@ -139,10 +169,12 @@ class ClientAPI:
         2. División en múltiples chunks: Si los datos exceden el tamaño del chunk (1MB), los divide
         3. Data pipeline: Cliente → Réplica1 → Réplica2 → Réplica3
         """
+        start_time = time.time()
         chunk_size = self.config.chunk_size
         data_remaining = data
         current_offset = offset
         overall_success = True
+        total_bytes_written = 0
         
         # Dividir datos en múltiples chunks si es necesario
         while len(data_remaining) > 0:
@@ -330,7 +362,11 @@ class ClientAPI:
             # Continuar con el siguiente chunk
             data_remaining = data_remaining[bytes_in_this_chunk:]
             current_offset += bytes_in_this_chunk
+            if write_success:
+                total_bytes_written += len(chunk_data)
         
+        end_time = time.time()
+        self._record_operation('write', start_time, end_time, overall_success, total_bytes_written)
         return overall_success
     
     def read(self, path: str, offset: int, length: int) -> Optional[bytes]:
@@ -339,21 +375,25 @@ class ClientAPI:
         
         En GFS, el cliente puede leer de cualquier réplica disponible.
         """
+        start_time = time.time()
         # Encontrar chunk
         chunk_handle, offset_in_chunk = self._find_chunk_for_offset(path, offset)
         if not chunk_handle:
             print(f"Error: No se encontró chunk para offset {offset}")
+            self._record_operation('read', start_time, time.time(), False, 0)
             return None
         
         # Obtener ubicaciones del chunk
         locations = self.get_chunk_locations(chunk_handle)
         if not locations:
             print(f"Error: No se encontraron ubicaciones para chunk {chunk_handle}")
+            self._record_operation('read', start_time, time.time(), False, 0)
             return None
         
         replicas = locations.get("replicas", [])
         if not replicas:
             print(f"Error: No hay réplicas disponibles")
+            self._record_operation('read', start_time, time.time(), False, 0)
             return None
         
         # Intentar leer de la primera réplica disponible
@@ -373,12 +413,16 @@ class ClientAPI:
                     result = response.json()
                     if result.get("success"):
                         data_b64 = result.get("data")
-                        return base64.b64decode(data_b64)
+                        data = base64.b64decode(data_b64)
+                        end_time = time.time()
+                        self._record_operation('read', start_time, end_time, True, len(data))
+                        return data
             except Exception as e:
                 print(f"Warning: Error leyendo de réplica {replica['chunkserver_id']}: {e}")
                 continue
         
         print(f"Error: No se pudo leer de ninguna réplica")
+        self._record_operation('read', start_time, time.time(), False, 0)
         return None
     
     def append(self, path: str, data: bytes) -> bool:
@@ -390,10 +434,12 @@ class ClientAPI:
         2. Añade el record en un offset determinado
         3. Si no cabe, puede crear un nuevo chunk
         """
+        start_time = time.time()
         # Obtener información del archivo
         file_info = self.get_file_info(path)
         if not file_info:
             print(f"Error: Archivo {path} no existe")
+            self._record_operation('append', start_time, time.time(), False, 0)
             return False
         
         chunk_handles = file_info.get("chunk_handles", [])
@@ -438,6 +484,9 @@ class ClientAPI:
                             if response.status_code == 200:
                                 result = response.json()
                                 if result.get("success"):
+                                    bytes_written = result.get("bytes_written", len(data))
+                                    end_time = time.time()
+                                    self._record_operation('append', start_time, end_time, True, bytes_written)
                                     return True
                                 # Si falla porque el chunk está lleno, crear nuevo chunk
                         except Exception as e:
@@ -447,6 +496,7 @@ class ClientAPI:
         chunk_info = self.allocate_chunk(path, chunk_index)
         if not chunk_info:
             print(f"Error: No se pudo asignar nuevo chunk")
+            self._record_operation('append', start_time, time.time(), False, 0)
             return False
         
         chunk_handle = chunk_info.get("chunk_handle")
@@ -483,11 +533,17 @@ class ClientAPI:
             
             if response.status_code == 200:
                 result = response.json()
-                return result.get("success", False)
+                success = result.get("success", False)
+                bytes_written = result.get("bytes_written", len(data)) if success else 0
+                end_time = time.time()
+                self._record_operation('append', start_time, end_time, success, bytes_written)
+                return success
             
+            self._record_operation('append', start_time, time.time(), False, 0)
             return False
         except Exception as e:
             print(f"Error en append: {e}")
+            self._record_operation('append', start_time, time.time(), False, 0)
             return False
     
     def snapshot_file(self, source_path: str, dest_path: str) -> bool:

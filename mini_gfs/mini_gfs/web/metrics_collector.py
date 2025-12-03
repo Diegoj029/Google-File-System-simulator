@@ -69,26 +69,60 @@ class MetricsCollector:
             if not system_state.get("success", False):
                 return None
             
-            # Calcular métricas
-            metrics = {
-                "timestamp": datetime.now().isoformat(),
-                "chunkservers_alive": 0,
-                "chunkservers_dead": 0,
-                "total_chunks": 0,
-                "under_replicated_chunks": 0,
-                "total_files": 0,
-                "chunkservers": {},
-                "chunk_distribution": {}
-            }
+            # Obtener métricas avanzadas del Master
+            try:
+                metrics_response = requests.get(
+                    f"{self.master_address}/metrics",
+                    timeout=5
+                )
+                if metrics_response.status_code == 200:
+                    advanced_metrics = metrics_response.json()
+                    if advanced_metrics.get("success"):
+                        # Usar métricas avanzadas si están disponibles
+                        metrics = {
+                            "timestamp": datetime.now().isoformat(),
+                            # Métricas básicas
+                            "chunkservers_alive": advanced_metrics.get("chunkservers_alive", 0),
+                            "chunkservers_dead": advanced_metrics.get("chunkservers_dead", 0),
+                            "total_chunks": advanced_metrics.get("total_chunks", 0),
+                            "under_replicated_chunks": advanced_metrics.get("under_replicated_chunks", 0),
+                            "total_files": advanced_metrics.get("total_files", 0),
+                            # Throughput (operaciones por segundo)
+                            "throughput": advanced_metrics.get("throughput", {}),
+                            # Latencia (promedio y percentiles)
+                            "latency": advanced_metrics.get("latency", {}),
+                            # Distribución de carga por chunkserver
+                            "chunkserver_load": advanced_metrics.get("chunkserver_load", {}),
+                            # Re-replicaciones activas
+                            "active_replications": advanced_metrics.get("active_replications", {}),
+                            # Tasa de fallos (fallos por hora)
+                            "failure_rate": advanced_metrics.get("failure_rate", 0.0),
+                            # Fragmentación de archivos
+                            "fragmentation": advanced_metrics.get("fragmentation", {}),
+                            # Réplicas obsoletas
+                            "stale_replicas": advanced_metrics.get("stale_replicas", {}),
+                            # Información detallada de chunkservers (del system_state)
+                            "chunkservers": {},
+                            "chunk_distribution": {}
+                        }
+                    else:
+                        # Fallback a cálculo manual
+                        metrics = self._calculate_basic_metrics(system_state)
+                else:
+                    # Fallback a cálculo manual
+                    metrics = self._calculate_basic_metrics(system_state)
+            except Exception as e:
+                # Fallback a cálculo manual si falla la obtención de métricas avanzadas
+                metrics = self._calculate_basic_metrics(system_state)
             
-            # Procesar ChunkServers
+            # Procesar ChunkServers (siempre necesario para información detallada)
+            if "chunkservers" not in metrics or not metrics["chunkservers"]:
+                metrics["chunkservers"] = {}
+                metrics["chunk_distribution"] = {}
+            
+            # Procesar ChunkServers (siempre necesario para información detallada)
             chunkservers = system_state.get("chunkservers", {})
             for cs_id, cs_info in chunkservers.items():
-                if cs_info.get("is_alive", False):
-                    metrics["chunkservers_alive"] += 1
-                else:
-                    metrics["chunkservers_dead"] += 1
-                
                 chunks_count = len(cs_info.get("chunks", []))
                 metrics["chunkservers"][cs_id] = {
                     "is_alive": cs_info.get("is_alive", False),
@@ -96,21 +130,6 @@ class MetricsCollector:
                     "last_heartbeat": cs_info.get("last_heartbeat")
                 }
                 metrics["chunk_distribution"][cs_id] = chunks_count
-            
-            # Procesar chunks
-            chunks = system_state.get("chunks", {})
-            metrics["total_chunks"] = len(chunks)
-            
-            # Contar chunks sub-replicados
-            replication_factor = system_state.get("replication_factor", 3)
-            for chunk_handle, chunk_info in chunks.items():
-                replicas_count = len(chunk_info.get("replicas", []))
-                if replicas_count < replication_factor:
-                    metrics["under_replicated_chunks"] += 1
-            
-            # Procesar archivos
-            files = system_state.get("files", {})
-            metrics["total_files"] = len(files)
             
             # Agregar a historial
             self.metrics_history.append(metrics)
@@ -129,6 +148,59 @@ class MetricsCollector:
                                  requests.exceptions.RequestException)):
                 print(f"Error recolectando métricas: {e}")
             return None
+    
+    def _calculate_basic_metrics(self, system_state: dict) -> dict:
+        """
+        Calcula métricas básicas desde system_state (fallback).
+        
+        Args:
+            system_state: Estado del sistema obtenido del Master
+        
+        Returns:
+            Diccionario con métricas básicas
+        """
+        metrics = {
+            "timestamp": datetime.now().isoformat(),
+            "chunkservers_alive": 0,
+            "chunkservers_dead": 0,
+            "total_chunks": 0,
+            "under_replicated_chunks": 0,
+            "total_files": 0,
+            "throughput": {},
+            "latency": {},
+            "chunkserver_load": {},
+            "active_replications": {"count": 0, "chunks": []},
+            "failure_rate": 0.0,
+            "fragmentation": {},
+            "stale_replicas": {},
+            "chunkservers": {},
+            "chunk_distribution": {}
+        }
+        
+        # Procesar ChunkServers
+        chunkservers = system_state.get("chunkservers", {})
+        for cs_id, cs_info in chunkservers.items():
+            if cs_info.get("is_alive", False):
+                metrics["chunkservers_alive"] += 1
+            else:
+                metrics["chunkservers_dead"] += 1
+        
+        # Procesar chunks
+        chunks = system_state.get("chunks", {})
+        metrics["total_chunks"] = len(chunks)
+        
+        # Contar chunks sub-replicados
+        replication_factor = system_state.get("replication_factor", 3)
+        for chunk_handle, chunk_info in chunks.items():
+            replicas_count = len(chunk_info.get("replicas", []))
+            if replicas_count < replication_factor:
+                metrics["under_replicated_chunks"] += 1
+        
+        # Procesar archivos
+        files = system_state.get("files", {})
+        metrics["total_files"] = len(files)
+        
+        return metrics
     
     def get_current(self) -> Optional[Dict]:
         """

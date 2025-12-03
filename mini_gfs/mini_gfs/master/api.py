@@ -96,6 +96,8 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
             response = self._handle_list_directory(data)
         elif path == '/update_chunk_size':
             response = self._handle_update_chunk_size(data)
+        elif path == '/record_operation':
+            response = self._handle_record_operation(data)
         elif path == '/clone_shared_chunk':
             response = self._handle_clone_shared_chunk(data)
         else:
@@ -324,6 +326,29 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
             "message": "Size updated successfully" if success else "Update failed"
         }
     
+    def _handle_record_operation(self, data: dict) -> dict:
+        """Maneja registro de una operación para métricas."""
+        operation_type = data.get('operation_type')
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        success = data.get('success', True)
+        bytes_transferred = data.get('bytes_transferred', 0)
+        chunkserver_id = data.get('chunkserver_id')
+        
+        if not operation_type or start_time is None or end_time is None:
+            return {"success": False, "message": "Missing required fields"}
+        
+        self.master.operations_tracker.record_operation(
+            operation_type=operation_type,
+            start_time=start_time,
+            end_time=end_time,
+            success=success,
+            bytes_transferred=bytes_transferred,
+            chunkserver_id=chunkserver_id
+        )
+        
+        return {"success": True, "message": "Operation recorded"}
+    
     def _handle_get_system_state(self) -> dict:
         """Obtiene el estado completo del sistema."""
         try:
@@ -391,7 +416,7 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
         if not system_state.get("success"):
             return system_state
         
-        # Calcular métricas
+        # Calcular métricas básicas
         chunkservers = system_state["chunkservers"]
         chunks = system_state["chunks"]
         replication_factor = system_state["replication_factor"]
@@ -404,13 +429,63 @@ class MasterAPIHandler(BaseHTTPRequestHandler):
             if len(chunk["replicas"]) < replication_factor
         )
         
+        # Obtener métricas avanzadas del tracker
+        tracker = self.master.operations_tracker
+        
+        # Throughput (operaciones por segundo)
+        throughput = tracker.get_throughput(window_seconds=60.0)
+        
+        # Latencia (promedio y percentiles)
+        latency_all = tracker.get_latency_stats(operation_type=None, window_seconds=60.0)
+        latency_read = tracker.get_latency_stats(operation_type='read', window_seconds=60.0)
+        latency_write = tracker.get_latency_stats(operation_type='write', window_seconds=60.0)
+        latency_append = tracker.get_latency_stats(operation_type='append', window_seconds=60.0)
+        
+        # Distribución de carga por chunkserver
+        chunkserver_load = tracker.get_chunkserver_load()
+        
+        # Re-replicaciones activas
+        active_replications = tracker.get_active_replications()
+        
+        # Tasa de fallos
+        failure_rate = tracker.get_failure_rate(window_seconds=3600.0)
+        
+        # Fragmentación de archivos
+        fragmentation = self.master.get_file_fragmentation_stats()
+        
+        # Réplicas obsoletas
+        stale_replicas = self.master.get_stale_replicas_stats()
+        
         return {
             "success": True,
+            # Métricas básicas
             "chunkservers_alive": chunkservers_alive,
             "chunkservers_dead": chunkservers_dead,
             "total_chunks": len(chunks),
             "under_replicated_chunks": under_replicated,
-            "total_files": len(system_state["files"])
+            "total_files": len(system_state["files"]),
+            # Throughput (operaciones por segundo)
+            "throughput": throughput,
+            # Latencia (promedio y percentiles)
+            "latency": {
+                "all": latency_all,
+                "read": latency_read,
+                "write": latency_write,
+                "append": latency_append
+            },
+            # Distribución de carga por chunkserver
+            "chunkserver_load": chunkserver_load,
+            # Re-replicaciones activas
+            "active_replications": {
+                "count": len(active_replications),
+                "chunks": list(active_replications.keys())
+            },
+            # Tasa de fallos (fallos por hora)
+            "failure_rate": failure_rate,
+            # Fragmentación de archivos
+            "fragmentation": fragmentation,
+            # Réplicas obsoletas
+            "stale_replicas": stale_replicas
         }
     
     def _handle_get_topology(self) -> dict:

@@ -8,6 +8,8 @@ import json
 import base64
 import socket
 import socketserver
+import time
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -75,6 +77,7 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
     
     def _handle_write_chunk(self, data: dict) -> dict:
         """Maneja escritura en chunk."""
+        start_time = time.time()
         chunk_handle = data.get('chunk_handle')
         offset = data.get('offset')
         data_b64 = data.get('data')
@@ -89,6 +92,10 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
             return {"success": False, "message": f"Invalid base64 data: {e}"}
         
         bytes_written = self.chunkserver.write_chunk(chunk_handle, offset, chunk_data)
+        end_time = time.time()
+        
+        # Registrar operación
+        self._record_operation('write', start_time, end_time, bytes_written > 0, bytes_written)
         
         # Obtener tamaño actual del chunk después de escribir
         current_size = self.chunkserver.get_chunk_size(chunk_handle)
@@ -102,6 +109,7 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
     
     def _handle_read_chunk(self, data: dict) -> dict:
         """Maneja lectura de chunk."""
+        start_time = time.time()
         chunk_handle = data.get('chunk_handle')
         offset = data.get('offset', 0)
         length = data.get('length')
@@ -110,9 +118,16 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
             return {"success": False, "message": "Missing chunk_handle or length"}
         
         chunk_data = self.chunkserver.read_chunk(chunk_handle, offset, length)
+        end_time = time.time()
         
         if chunk_data is None:
+            # Registrar operación fallida
+            self._record_operation('read', start_time, end_time, False, 0)
             return {"success": False, "message": "Chunk not found"}
+        
+        bytes_read = len(chunk_data)
+        # Registrar operación exitosa
+        self._record_operation('read', start_time, end_time, True, bytes_read)
         
         # Codificar datos en base64 para JSON
         data_b64 = base64.b64encode(chunk_data).decode('utf-8')
@@ -120,11 +135,12 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
         return {
             "success": True,
             "data": data_b64,
-            "bytes_read": len(chunk_data)
+            "bytes_read": bytes_read
         }
     
     def _handle_append_record(self, data: dict) -> dict:
         """Maneja append de record."""
+        start_time = time.time()
         chunk_handle = data.get('chunk_handle')
         data_b64 = data.get('data')
         
@@ -140,12 +156,18 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
         offset, bytes_written = self.chunkserver.append_record(
             chunk_handle, record_data, self.chunk_size
         )
+        end_time = time.time()
         
         if offset < 0:
+            # Registrar operación fallida
+            self._record_operation('append', start_time, end_time, False, 0)
             return {
                 "success": False,
                 "message": "Chunk is full, cannot append"
             }
+        
+        # Registrar operación exitosa
+        self._record_operation('append', start_time, end_time, True, bytes_written)
         
         return {
             "success": True,
@@ -237,6 +259,36 @@ class ChunkServerAPIHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             # Cliente cerró la conexión antes de recibir la respuesta
             # Esto es normal y no requiere logging de error
+            pass
+    
+    def _record_operation(self, operation_type: str, start_time: float, end_time: float,
+                         success: bool, bytes_transferred: int):
+        """
+        Registra una operación en el Master para métricas.
+        
+        Args:
+            operation_type: Tipo de operación ('read', 'write', 'append')
+            start_time: Timestamp de inicio
+            end_time: Timestamp de fin
+            success: Si la operación fue exitosa
+            bytes_transferred: Bytes transferidos
+        """
+        try:
+            master_address = self.chunkserver.config.master_address
+            requests.post(
+                f"{master_address}/record_operation",
+                json={
+                    "operation_type": operation_type,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "success": success,
+                    "bytes_transferred": bytes_transferred,
+                    "chunkserver_id": self.chunkserver.config.chunkserver_id
+                },
+                timeout=1  # Timeout corto para no bloquear
+            )
+        except Exception:
+            # Ignorar errores silenciosamente para no afectar el rendimiento
             pass
     
     def log_message(self, format, *args):

@@ -654,15 +654,116 @@ async function loadMetrics() {
         
         if (data.success && data.metrics) {
             const m = data.metrics;
+            // Métricas básicas
             document.getElementById('metric-alive').textContent = m.chunkservers_alive || 0;
             document.getElementById('metric-dead').textContent = m.chunkservers_dead || 0;
             document.getElementById('metric-chunks').textContent = m.total_chunks || 0;
             document.getElementById('metric-under-replicated').textContent = m.under_replicated_chunks || 0;
             document.getElementById('metric-files').textContent = m.total_files || 0;
+            
+            // Throughput (operaciones por segundo)
+            const throughput = m.throughput || {};
+            const totalThroughput = (throughput.read || 0) + (throughput.write || 0) + (throughput.append || 0);
+            document.getElementById('metric-throughput').textContent = totalThroughput.toFixed(2);
+            
+            // Latencia (promedio y percentiles)
+            const latency = m.latency || {};
+            const latencyAll = latency.all || {};
+            document.getElementById('metric-latency-avg').textContent = 
+                latencyAll.avg ? (latencyAll.avg * 1000).toFixed(2) : '-';
+            document.getElementById('metric-latency-p95').textContent = 
+                latencyAll.p95 ? (latencyAll.p95 * 1000).toFixed(2) : '-';
+            document.getElementById('metric-latency-p99').textContent = 
+                latencyAll.p99 ? (latencyAll.p99 * 1000).toFixed(2) : '-';
+            
+            // Tasa de fallos
+            document.getElementById('metric-failure-rate').textContent = 
+                (m.failure_rate || 0).toFixed(2);
+            
+            // Re-replicaciones activas
+            const activeReplications = m.active_replications || {};
+            document.getElementById('metric-active-replications').textContent = 
+                activeReplications.count || 0;
+            
+            // Réplicas obsoletas
+            const staleReplicas = m.stale_replicas || {};
+            document.getElementById('metric-stale-replicas').textContent = 
+                staleReplicas.total_stale_replicas || 0;
+            
+            // Mostrar detalles adicionales
+            showMetricsDetails(m);
         }
     } catch (error) {
         console.error('Error cargando métricas:', error);
     }
+}
+
+function showMetricsDetails(metrics) {
+    const detailsDiv = document.getElementById('metrics-details');
+    const contentDiv = document.getElementById('metrics-details-content');
+    
+    if (!metrics.throughput && !metrics.chunkserver_load && !metrics.fragmentation) {
+        detailsDiv.style.display = 'none';
+        return;
+    }
+    
+    detailsDiv.style.display = 'block';
+    let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px;">';
+    
+    // Throughput por tipo de operación
+    if (metrics.throughput) {
+        html += '<div><h4>Throughput por Operación</h4><ul>';
+        html += `<li>Read: ${(metrics.throughput.read || 0).toFixed(2)} ops/s</li>`;
+        html += `<li>Write: ${(metrics.throughput.write || 0).toFixed(2)} ops/s</li>`;
+        html += `<li>Append: ${(metrics.throughput.append || 0).toFixed(2)} ops/s</li>`;
+        html += '</ul></div>';
+    }
+    
+    // Latencia por tipo de operación
+    if (metrics.latency) {
+        html += '<div><h4>Latencia por Operación (ms)</h4><ul>';
+        ['read', 'write', 'append'].forEach(op => {
+            const lat = metrics.latency[op] || {};
+            if (lat.avg) {
+                html += `<li>${op.charAt(0).toUpperCase() + op.slice(1)}: avg=${(lat.avg * 1000).toFixed(2)}, p95=${(lat.p95 * 1000).toFixed(2)}, p99=${(lat.p99 * 1000).toFixed(2)}</li>`;
+            }
+        });
+        html += '</ul></div>';
+    }
+    
+    // Distribución de carga por chunkserver
+    if (metrics.chunkserver_load && Object.keys(metrics.chunkserver_load).length > 0) {
+        html += '<div><h4>Carga por ChunkServer</h4><ul>';
+        for (const [csId, load] of Object.entries(metrics.chunkserver_load)) {
+            const ops = load.operations || {};
+            const totalOps = load.total_operations || 0;
+            const bytes = (load.bytes_transferred || 0) / (1024 * 1024); // MB
+            html += `<li><strong>${csId}</strong>: ${totalOps} ops, ${bytes.toFixed(2)} MB</li>`;
+        }
+        html += '</ul></div>';
+    }
+    
+    // Fragmentación
+    if (metrics.fragmentation) {
+        const frag = metrics.fragmentation;
+        html += '<div><h4>Fragmentación de Archivos</h4><ul>';
+        html += `<li>Archivos totales: ${frag.total_files || 0}</li>`;
+        html += `<li>Chunks promedio por archivo: ${(frag.avg_chunks_per_file || 0).toFixed(2)}</li>`;
+        html += `<li>Máximo chunks por archivo: ${frag.max_chunks_per_file || 0}</li>`;
+        html += '</ul></div>';
+    }
+    
+    // Réplicas obsoletas
+    if (metrics.stale_replicas) {
+        const stale = metrics.stale_replicas;
+        html += '<div><h4>Réplicas Obsoletas</h4><ul>';
+        html += `<li>Chunks con réplicas obsoletas: ${stale.chunks_with_stale_replicas || 0}</li>`;
+        html += `<li>Total réplicas obsoletas: ${stale.total_stale_replicas || 0}</li>`;
+        html += '</ul></div>';
+    }
+    
+    html += '</div>';
+    contentDiv.innerHTML = html;
 }
 
 // ========== Gráficas ==========

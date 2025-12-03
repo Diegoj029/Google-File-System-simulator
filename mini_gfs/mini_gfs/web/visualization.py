@@ -369,10 +369,13 @@ class VisualizationGenerator:
                 # Agrupar chunks por archivo
                 files_chunks = {}
                 for chunk in chunks:
-                    file = chunk.get('file_path', 'unknown')
+                    file = chunk.get('file_path') or chunk.get('file_paths', [None])[0] or 'unknown'
                     if file not in files_chunks:
                         files_chunks[file] = {}
-                    for cs_id in chunk['chunkservers']:
+                    chunkservers = chunk.get('chunkservers', [])
+                    if not isinstance(chunkservers, list):
+                        chunkservers = []
+                    for cs_id in chunkservers:
                         files_chunks[file][cs_id] = files_chunks[file].get(cs_id, 0) + 1
                 
                 # Gráfico de barras apiladas

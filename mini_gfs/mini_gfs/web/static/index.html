@@ -9,8 +9,8 @@
 </head>
 <body>
     <header>
-        <h1>🖥️ Mini-GFS - Interfaz Web</h1>
-        <p>Sistema de Archivos Distribuido - Simulador Educativo</p>
+        <h1>🖥️ Mini-Google File System - Interfaz Web</h1>
+        <p>Simulador de Sistema de Archivos Distribuido - Sistemas Operativos Avanzados</p>
     </header>
 
     <div class="container">
@@ -185,6 +185,38 @@
                     <div class="metric-label">Total de Archivos</div>
                     <div class="metric-value" id="metric-files">-</div>
                 </div>
+                <div class="metric-card">
+                    <div class="metric-label">Throughput (ops/s)</div>
+                    <div class="metric-value" id="metric-throughput">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Latencia Promedio (ms)</div>
+                    <div class="metric-value" id="metric-latency-avg">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Latencia P95 (ms)</div>
+                    <div class="metric-value" id="metric-latency-p95">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Latencia P99 (ms)</div>
+                    <div class="metric-value" id="metric-latency-p99">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Tasa de Fallos (fallos/hora)</div>
+                    <div class="metric-value" id="metric-failure-rate">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Re-replicaciones Activas</div>
+                    <div class="metric-value" id="metric-active-replications">-</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Réplicas Obsoletas</div>
+                    <div class="metric-value" id="metric-stale-replicas">-</div>
+                </div>
+            </div>
+            <div class="metrics-details" id="metrics-details" style="margin-top: 20px; display: none;">
+                <h3>Detalles Adicionales</h3>
+                <div id="metrics-details-content"></div>
             </div>
             <button onclick="loadMetrics()">🔄 Actualizar Métricas</button>
         </section>

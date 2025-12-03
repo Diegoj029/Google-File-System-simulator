@@ -9,9 +9,10 @@ El Master es el coordinador central que:
 """
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from .metadata import MasterMetadata
+from .operations_tracker import OperationsTracker
 from ..common.config import MasterConfig, load_master_config
 from ..common.types import ChunkHandle, ChunkLocation
 
@@ -27,6 +28,7 @@ class Master:
     def __init__(self, config: Optional[MasterConfig] = None):
         self.config = config or load_master_config()
         self.metadata = MasterMetadata(self.config)
+        self.operations_tracker = OperationsTracker()
         self.running = False
         self._background_thread = None
         self._lock = threading.RLock()  # Usar RLock para permitir llamadas reentrantes
@@ -73,6 +75,9 @@ class Master:
                 dead_chunkservers = self.metadata.detect_dead_chunkservers()
                 if dead_chunkservers:
                     print(f"ChunkServers muertos detectados: {dead_chunkservers}")
+                    # Registrar fallos en el tracker
+                    for cs_id in dead_chunkservers:
+                        self.operations_tracker.record_chunkserver_failure(cs_id)
                 
                 # Identificar chunks que necesitan re-replicación
                 chunks_needing_replication = self.metadata.get_chunks_needing_replication()
@@ -82,6 +87,8 @@ class Master:
                     print(f"Chunks que necesitan re-replicación: {len(chunks_needing_replication)}")
                     # Limitar a 2 por iteración y hacerlo en threads separados
                     for chunk_handle in chunks_needing_replication[:2]:
+                        # Registrar inicio de re-replicación
+                        self.operations_tracker.start_replication(chunk_handle)
                         # Hacer re-replicación en thread separado para no bloquear
                         thread = threading.Thread(
                             target=self._attempt_replication,
@@ -271,11 +278,15 @@ class Master:
                 result = response.json()
                 if result.get("success"):
                     print(f"Chunk {chunk_handle} re-replicado desde {source_id} a {target_id}")
+                    # Registrar fin de re-replicación
+                    self.operations_tracker.end_replication(chunk_handle)
                     # Actualizar metadatos (el próximo heartbeat actualizará la lista)
                 else:
                     print(f"Error re-replicando chunk {chunk_handle}: {result.get('message')}")
+                    self.operations_tracker.end_replication(chunk_handle)
         except Exception as e:
             print(f"Error re-replicando chunk {chunk_handle}: {e}")
+            self.operations_tracker.end_replication(chunk_handle)
     
     def _delete_chunk_from_chunkservers(self, chunk_handle: ChunkHandle):
         """Envía comando de eliminación a todos los ChunkServers que tienen el chunk."""
@@ -386,4 +397,88 @@ class Master:
                     print(f"Warning: Error clonando contenido de chunk: {e}")
         
         return new_chunk_handle
+    
+    def get_file_fragmentation_stats(self) -> Dict:
+        """
+        Calcula estadísticas de fragmentación de archivos.
+        
+        Returns:
+            Diccionario con estadísticas de fragmentación:
+            {
+                'files_by_chunk_count': {num_chunks: count},
+                'avg_chunks_per_file': float,
+                'max_chunks_per_file': int,
+                'total_files': int
+            }
+        """
+        with self._lock:
+            files_by_chunk_count = {}
+            total_chunks = 0
+            max_chunks = 0
+            
+            for file_meta in self.metadata.files.values():
+                num_chunks = len([ch for ch in file_meta.chunk_handles if ch])
+                files_by_chunk_count[num_chunks] = files_by_chunk_count.get(num_chunks, 0) + 1
+                total_chunks += num_chunks
+                max_chunks = max(max_chunks, num_chunks)
+            
+            total_files = len(self.metadata.files)
+            avg_chunks = total_chunks / total_files if total_files > 0 else 0
+            
+            return {
+                'files_by_chunk_count': files_by_chunk_count,
+                'avg_chunks_per_file': avg_chunks,
+                'max_chunks_per_file': max_chunks,
+                'total_files': total_files
+            }
+    
+    def get_stale_replicas_stats(self) -> Dict:
+        """
+        Calcula estadísticas de réplicas obsoletas (versiones inconsistentes).
+        
+        Returns:
+            Diccionario con estadísticas:
+            {
+                'chunks_with_stale_replicas': int,
+                'total_stale_replicas': int,
+                'stale_replicas_by_chunkserver': {cs_id: count}
+            }
+        """
+        with self._lock:
+            chunks_with_stale = 0
+            total_stale = 0
+            stale_by_cs = {}
+            
+            for chunk_handle, chunk_meta in self.metadata.chunks.items():
+                # Obtener versión esperada (la versión del chunk en metadatos)
+                expected_version = chunk_meta.version
+                
+                # Contar réplicas con versión diferente (esto requiere verificar en chunkservers)
+                # Por simplicidad, asumimos que si un chunkserver no reporta el chunk en heartbeat,
+                # puede ser una réplica obsoleta
+                # En un sistema real, se verificaría la versión en cada chunkserver
+                live_replicas = [
+                    r for r in chunk_meta.replicas
+                    if r.chunkserver_id in self.metadata.chunkservers
+                    and self.metadata.chunkservers[r.chunkserver_id].is_alive
+                    and chunk_handle in self.metadata.chunkserver_chunks.get(r.chunkserver_id, set())
+                ]
+                
+                # Si hay menos réplicas vivas que las esperadas, algunas pueden estar obsoletas
+                if len(live_replicas) < len(chunk_meta.replicas):
+                    chunks_with_stale += 1
+                    stale_count = len(chunk_meta.replicas) - len(live_replicas)
+                    total_stale += stale_count
+                    
+                    # Contar por chunkserver (réplicas que no están vivas)
+                    for replica in chunk_meta.replicas:
+                        if replica.chunkserver_id not in [r.chunkserver_id for r in live_replicas]:
+                            stale_by_cs[replica.chunkserver_id] = \
+                                stale_by_cs.get(replica.chunkserver_id, 0) + 1
+            
+            return {
+                'chunks_with_stale_replicas': chunks_with_stale,
+                'total_stale_replicas': total_stale,
+                'stale_replicas_by_chunkserver': stale_by_cs
+            }
 
