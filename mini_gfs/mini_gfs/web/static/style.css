@@ -271,9 +271,9 @@ tr:hover {
 /* Archivos - Layout de dos columnas */
 .files-container {
     display: grid;
-    grid-template-columns: 2fr 1fr;
+    grid-template-columns: 2fr 2fr;
     gap: 20px;
-    grid-column: span 2;
+    grid-column: span 3;
 }
 
 .files-operations {
